@@ -201,28 +201,24 @@ function* iterateOverStackPureExpressions(
 
 function isStatementStackPure(api: core.API, stmt: ASTPath) {
   const j = api.jscodeshift;
-  console.log("ANALYZING", j(stmt.node).toSource());
+  // console.log("ANALYZING", j(stmt.node).toSource());
 
   // TODO: Actually analyze the if/for statements, they could be stack pure after simplifications
   if (n.ForStatement.check(stmt.node)) return false;
   if (n.IfStatement.check(stmt.node)) return false;
 
-  for (const expr of iterateOverStackPureExpressions(api, stmt, true, true)) {
+  for (const expr of iterateOverExpressions(api, stmt, true, true)) {
     if (n.CallExpression.check(expr.node)) {
       if (!isCallStackPure(api, expr.node)) {
-        console.log("CALL IMPURE");
         return false;
       }
     }
 
     const source = j(expr.node as ASTNode).toSource();
     if (source === "$k[$j++]") {
-      console.log("PUSH-impure", source);
       return false;
     }
     if (source === "$k[--$j]") {
-      console.log("POP-impure");
-
       return false;
     }
   }
@@ -321,7 +317,157 @@ function findLeadingPopsAndTrailingPushes(
   return { leadingPops, trailingPushes };
 }
 
-function simplifyIfAccumulator(api: core.API, src: Collection<any>) {
+// function analyzePureInnerFunction(api: core.API, src: Collection<any>) {
+
+function analyzePureInnerFunctions(api: core.API, src: Collection<any>) {
+  const j = api.jscodeshift;
+
+  // Find all the top level functions and go through each one by one
+  src.find(j.FunctionDeclaration).forEach((fnPath) => {
+    const pathNames = findPathNames(fnPath);
+    if (pathNames.length > 4) {
+      // The function is not top-level
+      return;
+    }
+
+    // The functions whose names also show up as string literals can be dynamically accessed, we must be careful optimizing them
+    const strLiterals = new Set<string>();
+    j(fnPath.node)
+      .find(j.Literal)
+      .forEach((strLit) => {
+        if (typeof strLit.node.value !== "string") return;
+        strLiterals.add(strLit.node.value);
+      });
+
+    console.log({ strLiterals });
+
+    const fnNameToArityMap = new Map<
+      string,
+      { betterFnName: string; inCount: number; outCount: number }
+    >();
+
+    j(fnPath.node)
+      .find(j.ExpressionStatement)
+      .forEach((innerFnPath) => {
+        if (!n.AssignmentExpression.check(innerFnPath.node.expression)) return;
+        if (!n.FunctionExpression.check(innerFnPath.node.expression.right))
+          return;
+
+        const rawFnName = j(innerFnPath.node.expression.left).toSource();
+        if (!rawFnName.startsWith("$_."))
+          throw new Error("Unexpected fn name " + rawFnName);
+        const betterFnName = rawFnName.replace("$_.", "");
+
+        if (innerFnPath.node.expression.right.params.length > 0) {
+          console.log(
+            "Function already has parameters, skipping...",
+            rawFnName
+          );
+        }
+
+        if (strLiterals.has(betterFnName)) {
+          console.log(
+            "TODO: Don't give up on dynamically referenced fn",
+            betterFnName
+          );
+          return;
+        }
+
+        let { leadingPops, trailingPushes } = findLeadingPopsAndTrailingPushes(
+          api,
+          innerFnPath.get("expression").get("right").get("body")
+        );
+
+        console.log(
+          "Found inner fn declaration with arity",
+          rawFnName,
+          leadingPops.length,
+          trailingPushes.length
+        );
+
+        if (trailingPushes.length > 1) {
+          console.log(
+            "Cannot handle returning multiple values in fn (returning only the last one)",
+            rawFnName
+          );
+          trailingPushes = trailingPushes.slice(-1);
+        }
+
+        fnNameToArityMap.set(rawFnName, {
+          betterFnName,
+          inCount: leadingPops.length,
+          outCount: trailingPushes.length,
+        });
+
+        if (trailingPushes[0]) {
+          trailingPushes[0].path.replace(
+            `return ${j(trailingPushes[0].val).toSource()}` as any
+          );
+        }
+
+        const newArguments = leadingPops.map((popExpr) => {
+          const variableName = genVariable();
+          popExpr.replace(`${variableName}` as any);
+          return { popExpr, variableName };
+        });
+
+        innerFnPath
+          .get("expression")
+          .get("right")
+          .get("params")
+          .replace(newArguments.map((a) => a.variableName));
+
+        // Alternative, bugs out
+        // innerFnPath.replace(
+        //   (`var ${betterFnName} = function(${newArguments
+        //     .map((a) => a.variableName)
+        //     .join(", ")}) ` +
+        //     j(innerFnPath.node.expression.right.body).toSource()) as any
+        // );
+      });
+
+    // Replace all the call sites of the processed functions
+    j(fnPath.node)
+      .find(j.ExpressionStatement)
+      .forEach((callPath) => {
+        if (!n.CallExpression.check(callPath.node.expression)) return;
+        const fnName = j(callPath.node.expression.callee).toSource();
+        const arity = fnNameToArityMap.get(fnName);
+        if (!arity) return;
+
+        const varNames = Array.from(new Array(arity.inCount), (_, i) =>
+          genVariable()
+        );
+        for (const varName of varNames) {
+          callPath.insertBefore(`var ${varName} = $k[--$j]`);
+        }
+
+        if (arity.outCount > 0) {
+          const tmpVar = genVariable();
+          callPath.replace(
+            `var ${tmpVar} = ${fnName}(${varNames.join(", ")})` as any
+          );
+          callPath.insertAfter(`$k[$j++] = ${tmpVar};` as any);
+        } else {
+          callPath.replace(`${fnName}(${varNames.join(", ")})` as any);
+        }
+
+        // Alternative
+        // const varString = varNames.join(", ");
+        // if (arity.outCount > 0) {
+        //     const tmpVar = genVariable();
+        //     callPath.replace(
+        //     `var ${tmpVar} = ${arity.betterFnName}(${varString});` as any
+        //     );
+        //     callPath.insertAfter(`$k[$j++] = ${tmpVar};` as any);
+        // } else {
+        //     callPath.replace(`${arity.betterFnName}(${varString});` as any);
+        // }
+      });
+  });
+}
+
+function simplifyIfForAccumulator(api: core.API, src: Collection<any>) {
   const j = api.jscodeshift;
 
   let editCount = 0;
@@ -345,6 +491,8 @@ function simplifyIfAccumulator(api: core.API, src: Collection<any>) {
       ? ifForPath.get("consequent")
       : ifForPath.get("body");
 
+    // TODO: Analyze one-liner blocks too
+    if (!n.BlockStatement.check(bodyPath.node)) return;
     const { leadingPops, trailingPushes } = findLeadingPopsAndTrailingPushes(
       api,
       bodyPath
@@ -367,6 +515,48 @@ function simplifyIfAccumulator(api: core.API, src: Collection<any>) {
   console.log("if/for accumulators simplification", editCount);
 }
 
+function simplifyBranchesWithCommonPush(api: core.API, src: Collection<any>) {
+  const j = api.jscodeshift;
+
+  let editCount = 0;
+  src.find(j.IfStatement).forEach((ifPath) => {
+    if (!ifPath.node.alternate) return;
+    if (!n.BlockStatement.check(ifPath.node.consequent)) return;
+    if (!n.BlockStatement.check(ifPath.node.alternate)) return;
+
+    const { trailingPushes: p1 } = findLeadingPopsAndTrailingPushes(
+      api,
+      ifPath.get("consequent")
+    );
+    const { trailingPushes: p2 } = findLeadingPopsAndTrailingPushes(
+      api,
+      ifPath.get("alternate")
+    );
+
+    const commonLength = Math.min(p1.length, p2.length);
+    const p1_ = p1.slice(-commonLength);
+    const p2_ = p2.slice(-commonLength);
+    const data = Array.from(new Array(commonLength), (_, i) => ({
+      push1: p1_[i],
+      push2: p2_[i],
+      variableName: genVariable(),
+    }));
+
+    for (const { push1, push2, variableName } of data) {
+      ifPath.insertBefore(`var ${variableName}`);
+      push1.path.replace(`${variableName} = ${j(push1.val).toSource()}` as any);
+      push2.path.replace(`${variableName} = ${j(push2.val).toSource()}` as any);
+    }
+    for (const { variableName } of data.slice().reverse()) {
+      ifPath.insertAfter(`$k[$j++] = ${variableName}`);
+    }
+
+    editCount += commonLength;
+  });
+
+  console.log("both branches common push", editCount);
+}
+
 function simplifyBranchesWithCommonPop(api: core.API, src: Collection<any>) {
   const j = api.jscodeshift;
 
@@ -376,48 +566,66 @@ function simplifyBranchesWithCommonPop(api: core.API, src: Collection<any>) {
     if (!n.BlockStatement.check(ifPath.node.consequent)) return;
     if (!n.BlockStatement.check(ifPath.node.alternate)) return;
 
-    const iter1 = iterateOverStackPureExpressions(
-      api,
-      ifPath.get("consequent").get("body").get(0),
-      true
-    );
-    let firstPopOn1: null | NodePath = null;
-    for (const expr of iter1) {
-      // We cannot propagate through another push
-      if (j(expr.node as any).toSource() === "$k[$j++]") {
-        break;
-      }
+    function analyze(path: ASTPath) {
+      const iter1 = iterateOverStackPureExpressions(
+        api,
+        path.get("body").get(0),
+        true
+      );
+      let eliminateFn: null | ((variableName: string) => void) = null;
+      for (const expr of iter1) {
+        // We cannot propagate through another push
+        const exprString = j(expr.node as ASTNode).toSource();
+        if (exprString === "$k[$j++]") {
+          break;
+        }
 
-      if (j(expr.node as ASTNode).toSource() === "$k[--$j]") {
-        firstPopOn1 = expr;
-        break;
+        // Expressions of the `$j--` form
+        if (
+          n.UpdateExpression.check(expr.node) &&
+          expr.node.operator === "--" &&
+          j(expr.node.argument).toSource() === "$j"
+        ) {
+          eliminateFn = () => expr.prune();
+        }
+
+        // Expressions of the `$j -= XX` form
+        if (
+          n.AssignmentExpression.check(expr.node) &&
+          expr.node.operator === "-=" &&
+          j(expr.node.left).toSource() === "$j" &&
+          n.Literal.check(expr.node.right) &&
+          typeof expr.node.right.value === "number" &&
+          expr.node.right.value > 0
+        ) {
+          const val = expr.node.right.value;
+          eliminateFn = (variableName: string) => {
+            if (val === 1) {
+              expr.prune();
+            } else {
+              expr.replace(`$j -= ${val - 1}` as any);
+            }
+          };
+        }
+
+        if (exprString === "$k[--$j]") {
+          eliminateFn = (variableName: string) =>
+            expr.replace(`${variableName}` as any);
+          break;
+        }
       }
+      return eliminateFn;
     }
 
-    const iter2 = iterateOverStackPureExpressions(
-      api,
-      ifPath.get("alternate").get("body").get(0),
-      true
-    );
-    let firstPopOn2: null | NodePath = null;
-    for (const expr of iter2) {
-      // We cannot propagate through another push
-      if (j(expr.node as any).toSource() === "$k[$j++]") {
-        break;
-      }
-
-      if (j(expr.node as ASTNode).toSource() === "$k[--$j]") {
-        firstPopOn2 = expr;
-        break;
-      }
-    }
+    const firstPopOn1 = analyze(ifPath.get("consequent"));
+    const firstPopOn2 = analyze(ifPath.get("alternate"));
 
     if (firstPopOn1 && firstPopOn2) {
       // console.log("REPLACING", findPathNames(expr));
       const variableName = genVariable();
       ifPath.insertBefore(`var ${variableName} = $k[--$j]` as any);
-      firstPopOn1.replace(`${variableName}` as any);
-      firstPopOn2.replace(`${variableName}` as any);
+      firstPopOn1(variableName);
+      firstPopOn2(variableName);
       editCount++;
     }
   });
@@ -437,7 +645,7 @@ function getVariableDecl(node: n.ASTNode) {
 let freeVariable: number | null = null;
 const genVariable = () => {
   if (freeVariable === null) throw new Error("UNINITIALIZED");
-  const variable = `__${freeVariable.toString(16)}`;
+  const variable = `__${freeVariable.toString(36)}`;
   freeVariable++;
   return variable;
 };
@@ -743,30 +951,8 @@ function arrayLoad(api: core.API, src: Collection<any>) {
   console.log("array edit count", editCount);
 }
 
-const transformer: Transform = function transformer(file, api) {
+function simplifyPeek(api: core.API, src: Collection<any>) {
   const j = api.jscodeshift;
-
-  //   console.log("file.source", file.source);
-
-  let src = j(file.source);
-
-  // TODO: Optimize
-  const reload = () => {
-    // console.log("BEFORE RELOAD");
-    // src.find(j.FunctionDeclaration).replaceWith((n) => j(n.node).toSource());
-    src = j(src.toSource());
-    // console.log("AFTER RELOAD");
-  };
-
-  const allVarsRaw = Array.from(file.source.matchAll(/var __([^=\s_]+)/g));
-  const allVars = allVarsRaw.map((v) => parseInt(v[1], 16));
-  const maxVar = Math.max(...allVars, 0);
-  if (isNaN(maxVar))
-    throw new Error(
-      "Incorrect max var! " + allVarsRaw.map((v) => v[0]).join(",")
-    );
-  freeVariable = maxVar + 1;
-
   let peekEditCount = 0;
   src.find(j.VariableDeclaration).forEach((thisPath) => {
     const thisNode = thisPath.node;
@@ -795,26 +981,88 @@ const transformer: Transform = function transformer(file, api) {
     peekEditCount++;
   });
 
-  simplifyIfAccumulator(api, src);
+  console.log("peek edit count", peekEditCount);
+}
+
+const transformer: Transform = function transformer(file, api) {
+  const j = api.jscodeshift;
+
+  //   console.log("file.source", file.source);
+
+  let src = j(file.source);
+
+  // TODO: Optimize
+  const reload = () => {
+    // console.log("BEFORE RELOAD");
+    // src.find(j.FunctionDeclaration).replaceWith((n) => j(n.node).toSource());
+    src = j(src.toSource());
+    // console.log("AFTER RELOAD");
+  };
+
+  const allVarsRaw = Array.from(file.source.matchAll(/var __([^=\s_]+)/g));
+  const allVars = allVarsRaw.map((v) => parseInt(v[1], 16));
+  const maxVar = Math.max(...allVars, 0);
+  if (isNaN(maxVar))
+    throw new Error(
+      "Incorrect max var! " + allVarsRaw.map((v) => v[0]).join(",")
+    );
+  freeVariable = maxVar + 1;
+
+  simplifyBranchesWithCommonPop(api, src);
+  reload();
+  simplifyBranchesWithCommonPop(api, src);
+  reload();
+  simplifyBranchesWithCommonPop(api, src);
+  reload();
+  simplifyPushPop(api, src);
+  reload();
+
+  simplifyBranchesWithCommonPush(api, src);
+  reload();
+  simplifyBranchesWithCommonPush(api, src);
+  reload();
+  simplifyPushPop(api, src);
+  reload();
+
+  simplifyIfForAccumulator(api, src);
+  reload();
+  simplifyIfForAccumulator(api, src);
   reload();
 
   // // Three rounds of the push-pop simplification
-  // simplifyPushPop(api, src);
-  // simplifyPushPop(api, src);
-  // simplifyPushPop(api, src);
-  // // push-pop edit count 142
-  // // push-pop edit count 43
-  // // push-pop edit count 0
+  simplifyPushPop(api, src);
+  reload();
+
+  analyzePureInnerFunctions(api, src);
+  reload();
+  simplifyPushPop(api, src);
+  reload();
+  simplifyPushPop(api, src);
+  reload();
+  simplifyPushPop(api, src);
+  reload();
+  simplifyPushPop(api, src);
+  reload();
+  simplifyLongDistancePushPops(api, src);
+  reload();
+  simplifyLongDistancePushPops(api, src);
+  reload();
+  simplifyLongDistancePushPops(api, src);
+  reload();
+
+  // Inlining Infinities enables more push-pop optimization
+  inlineInfinities(api, src);
+  reload();
+  simplifyPushPop(api, src);
+  reload();
+  simplifyLongDistancePushPops(api, src);
+  reload();
 
   // // Reload the file
   // src = j(src.toSource());
 
-  // // Inlining Infinities enables more push-pop optimization
-  // inlineInfinities(api, src);
   // simplifyPushPop(api, src);
   // simplifyPushPop(api, src);
-
-  // console.log("peek edit count", peekEditCount);
 
   // // Reload the file
   // src = j(src.toSource());
@@ -826,10 +1074,6 @@ const transformer: Transform = function transformer(file, api) {
   // // src = j(src.toSource());
   // reload();
 
-  // simplifyBranchesWithCommonPop(api, src);
-  // reload();
-  // simplifyPushPop(api, src);
-  // reload();
   // simplifyBranchesWithCommonPop(api, src);
   // reload();
   // simplifyPushPop(api, src);
@@ -851,6 +1095,9 @@ const transformer: Transform = function transformer(file, api) {
   // // simplify long push-pop 902
   // // simplify long push-pop 5
   // // simplify long push-pop 0
+
+  // This one is done at the end since it can block other simplifications
+  // simplifyPeek(api, src);
 
   return src.toSource();
 };
