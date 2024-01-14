@@ -56,23 +56,44 @@ var $_ = {}; // base of the dictionary stack
 //	$a(len)	: Create a new array of length `len`
 function $a(a) {
     if (!arguments.length) {
-        for (var i = $j - 1; i >= 0 && $k[i] !== Infinity; i--);
-        if (i < 0) {
-            throw new Error('array-marker-not-found');
-        }
-        a = $k.splice(i + 1, $j - 1 - i);
-        $j = i;
-        $k = $k.slice(0, $j)
+      for (var i = $j - 1; i >= 0 && $k[i] !== Infinity; i--);
+      if (i < 0) {
+        throw new Error("array-marker-not-found");
+      }
+      a = $k.splice(i + 1, $j - 1 - i);
+      $j = i;
     } else if (!(a instanceof Array)) {
-        a = new Array(+arguments[0]);
-        for (var i = 0, l = a.length; i < l; i++) {
-            a[i] = null;
-        }
+      a = new Array(+arguments[0]);
+      for (var i = 0, l = a.length; i < l; i++) {
+        a[i] = null;
+      }
     }
-    a.b = a; // base array
-    a.o = 0; // offset into base
-    return a;
-}
+    return new ArrayView(a, 0, a.length);
+  }
+  
+  function $geti(s, o, l) {
+      if (s instanceof ArrayView) {
+          return new ArrayView(s.b, s.o + o, l);
+      }
+      if (s instanceof Uint8Array) {
+          return s.subarray(o, o + l);
+      }
+      // Must be a string
+      return s.substr(o, l);
+  }
+  
+  class ArrayView {
+    constructor(base, offset, length) {
+      this.b = base;
+      this.o = offset;
+      this.length = length;
+    }
+  
+    getRawArray() {
+      if (this.o === 0 && this.length === this.b.length) return this.b;
+      return this.b.slice(this.o, this.o + this.length);
+    }
+  }
 
 // dict ctor
 //	$d() : look for the Infinity marker on the stack
@@ -235,14 +256,14 @@ function $cvx(s) {
 //	s : source
 //	k : key
 function $get(s, k) {
+    if (s instanceof ArrayView) {
+        return s.b[s.o + k];
+    }
     if (s instanceof Uint8Array) {
         return s[k];
     }
     if (typeof s === 'string') {
         return s.charCodeAt(k);
-    }
-    if (s instanceof Array) {
-        return s.b[s.o + k];
     }
     if (k instanceof Uint8Array) {
         return s.get($z(k));
@@ -255,10 +276,10 @@ function $get(s, k) {
 //	k : key
 //	v : value
 function $put(d, k, v) {
-    if (d instanceof Uint8Array) {
-        d[k] = v;
-    } else if (d instanceof Array) {
+    if (d instanceof ArrayView) {
         d.b[d.o + k] = v;
+    } else if (d instanceof Uint8Array) {
+        d[k] = v;
     } else if (typeof d == 'object') {
         if (k instanceof Uint8Array) {
             d.set($z(k), v);
@@ -270,30 +291,22 @@ function $put(d, k, v) {
     }
 }
 
-// getinterval operator
-//	s : src
-//	o : offset
-//	l : length
-function $geti(s, o, l) {
-    if (s instanceof Uint8Array) {
-        return s.subarray(o, o + l);
-    }
-    if (s instanceof Array) {
-        var a = new Array(l);
-        a.b = s.b; // base array
-        a.o = s.o + o; // offset into base
-        return a;
-    }
-    // Must be a string
-    return s.substr(o, l);
-}
-
 // putinterval operator
 //	d : dst
 //	o : offset
 //	s : src
 function $puti(d, o, s) {
-    if (d instanceof Uint8Array) {
+    if (d instanceof ArrayView) {
+        // Operate on the base arrays
+        var darr = d.b;
+        var doff = o + d.o;
+        var sarr = s.b;
+        var soff = s.o;
+
+        for (var i = 0, l = s.length; i < l; i++) {
+            darr[doff + i] = sarr[soff + i];
+        }
+    } else if (d instanceof Uint8Array) {
         if (typeof s == 'string') {
             for (var i = 0, l = s.length; i < l; i++) {
                 d[o + i] = s.charCodeAt(i);
@@ -304,16 +317,6 @@ function $puti(d, o, s) {
             for (var i = s.length - 1; i >= 0; i--) {
                 d[o + i] = s[i];
             }
-        }
-    } else if (d instanceof Array) {
-        // Operate on the base arrays
-        var darr = d.b;
-        var doff = o + d.o;
-        var sarr = s.b;
-        var soff = s.o;
-
-        for (var i = 0, l = s.length; i < l; i++) {
-            darr[doff + i] = sarr[soff + i];
         }
     } else {
         throw new Error('putinterval-not-writable-' + (typeof d));
@@ -339,7 +342,7 @@ function $type(v) {
     if (t == 'function') {
         return 'operatortype';
     }
-    if (v instanceof Array) {
+    if (v instanceof ArrayView) {
         return 'arraytype';
     }
     return 'dicttype';
@@ -428,15 +431,15 @@ function $search(str, seek) {
 // The callback is omitted when forall is being used just to push onto the
 // stack.  The callback normally returns undefined.  A return of true means break.
 function $forall(o, cb) {
-    if (o instanceof Uint8Array) {
-        for (var i = 0, l = o.length; i < l; i++) {
-            $k[$j++] = o[i];
-            if (cb && cb()) break;
-        }
-    } else if (o instanceof Array) {
+    if (o instanceof ArrayView) {
         // The array may be a view.
         for (var a = o.b, i = o.o, l = o.o + o.length; i < l; i++) {
             $k[$j++] = a[i];
+            if (cb && cb()) break;
+        }
+    } else if (o instanceof Uint8Array) {
+        for (var i = 0, l = o.length; i < l; i++) {
+            $k[$j++] = o[i];
             if (cb && cb()) break;
         }
     } else if (typeof o === 'string') {
@@ -485,30 +488,82 @@ function $astore(a) {
 }
 
 function $eq(a, b) {
-    if (typeof a === 'string' && typeof b === 'string') {
-        return a == b;
+    if (typeof a === "string" && typeof b === "string") {
+      return a == b;
     }
     if (a instanceof Uint8Array && b instanceof Uint8Array) {
-        if (a.length != b.length) {
-            return false;
+      if (a.length != b.length) {
+        return false;
+      }
+      for (var i = 0, l = a.length; i < l; i++) {
+        if (a[i] != b[i]) {
+          return false;
         }
-        for (var i = 0, l = a.length; i < l; i++) {
-            if (a[i] != b[i]) {
-                return false;
-            }
-        }
-        return true;
+      }
+      return true;
     }
-    if (a instanceof Uint8Array && typeof b === 'string' ||
-        b instanceof Uint8Array && typeof a === 'string') {
-        if (a instanceof Uint8Array) {
-            a = $z(a);
-        } else {
-            b = $z(b);
+    if (
+      (a instanceof Uint8Array && typeof b === "string") ||
+      (b instanceof Uint8Array && typeof a === "string")
+    ) {
+      if (a.length != b.length) {
+        return false;
+      }
+      //   console.log("cmp", a, b);
+      if (a instanceof Uint8Array) {
+        for (var i = 0, l = a.length; i < l; i++) {
+          if (a[i] != b.charCodeAt(i)) {
+            return false;
+          }
         }
-        return a == b;
+      } else {
+        for (var i = 0, l = a.length; i < l; i++) {
+          if (a.charCodeAt(i) != b[i]) {
+            return false;
+          }
+        }
+      }
+      return true;
     }
     return a == b;
+  }
+
+function* $aload_it(a) {
+    const o = a.o;
+    const lim = a.o + a.length;
+    for (let i=o; i<lim; ++i) {
+        yield a.b[i];
+    }
+}
+
+function* $forall_it(o) {
+    if (o instanceof ArrayView) {
+        // The array may be a view.
+        for (var a = o.b, i = o.o, l = o.o + o.length; i < l; i++) {
+            yield a[i];
+        }
+    } else if (o instanceof Uint8Array) {
+        for (var i = 0, l = o.length; i < l; i++) {
+            yield o[i];
+        }
+    } else if (typeof o === 'string') {
+        for (var i = 0, l = o.length; i < l; i++) {
+            yield o.charCodeAt(i);
+        }
+    } else if (o instanceof Map) {
+        for (var keys = o.keys(), i = 0, l = o.size; i < l; i++) {
+            var id = keys.next().value;
+            // yield id;
+            $k[$j++] = id;
+            yield o.get(id);
+        }
+    } else {
+        for (var id in o) {
+            // yield id;
+            $k[$j++] = id;
+            yield o[id];
+        }
+    }
 }
 
 function $ne(a, b) {
