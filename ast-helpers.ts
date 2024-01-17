@@ -1,38 +1,46 @@
 import { parse, print } from "recast";
-import { namedTypes as n, visit } from "ast-types";
+import { namedTypes as n, builders as b, visit } from "ast-types";
 import { NodePath } from "ast-types/lib/node-path";
 
 import { Type } from "ast-types/lib/types";
 
 export function findInTree<N>(
-  tree: n.Node,
+  tree: n.Node | NodePath,
   nodeType: Type<N>,
   callback: (path: NodePath<N>) => void
 ) {
-  visit(tree, {
-    visitNode(path) {
-      if (nodeType.check(path.node)) {
-        callback(path as any);
-      }
+  const treeNode = n.Node.check(tree) ? tree : tree.node;
+  const pathToPrepend = n.Node.check(tree) ? null : tree;
+  visit(treeNode, {
+    ["visit" + nodeType.toString()]: function (path) {
+      if (!nodeType.check(path.node)) throw new Error("BROKEN!");
+      const fullPath = pathToPrepend ? joinPaths(pathToPrepend, path) : path;
+      callback(fullPath as any);
       this.traverse(path);
     },
   });
 }
 
 let freeVariable: number | null = null;
-export const initVariables = (source: string) => {
-  const allVarsRaw = Array.from(source.matchAll(/var __([^=\s_]+)/g));
-  const allVars = allVarsRaw.map((v) => parseInt(v[1], 36));
+export const initVariables = (tree: n.Node) => {
+  const identifiers: string[] = [];
+  findInTree(tree, n.Identifier, (id) => identifiers.push(id.node.name));
+
+  const allVarsRaw = identifiers
+    .map((id) => id.match(/_v([^=\s_]+)/))
+    .filter((m) => !!m);
+  const allVars = allVarsRaw.map((v) => parseInt(v![1], 36));
+  console.log(JSON.stringify({ raw: allVarsRaw.map((v) => v![0]), allVars }));
   const maxVar = Math.max(...allVars, 0);
   if (isNaN(maxVar))
     throw new Error(
-      "Incorrect max var! " + allVarsRaw.map((v) => v[0]).join(",")
+      "Incorrect max var! " + allVarsRaw.map((v) => v![0]).join(",")
     );
   freeVariable = maxVar + 1;
 };
 export const genVariable = () => {
   if (freeVariable === null) throw new Error("UNINITIALIZED");
-  const variable = `__${freeVariable.toString(36)}`;
+  const variable = `_v${freeVariable.toString(36)}`;
   freeVariable++;
   return variable;
 };
@@ -68,6 +76,14 @@ export function findPathNames(path: NodePath) {
     curPath = curPath.parentPath;
   }
   return names;
+}
+
+function findRoot(path: NodePath) {
+  let curPath: NodePath = path;
+  while (true) {
+    if (!curPath.parentPath || !curPath.parentPath.node) return curPath.node;
+    curPath = curPath.parentPath;
+  }
 }
 
 function joinPaths(path1: NodePath, path2: NodePath) {
@@ -122,6 +138,15 @@ function* iterateOverExpressions(
       }
       if (!isStatementStackPure(currentStmt.path.get("body"))) return;
     }
+    if (n.ForOfStatement.check(currentStmt.node)) {
+      if (currentStmt.node.right) {
+        yield* visitExprs(
+          currentStmt.node.right,
+          currentStmt.path.get("right")
+        );
+      }
+      if (!isStatementStackPure(currentStmt.path.get("body"))) return;
+    }
 
     yield* visitExprs(currentStmt.node, currentStmt.path);
 
@@ -160,7 +185,7 @@ function isStatementStackPure(stmt: NodePath) {
 
   for (const expr of iterateOverExpressions(stmt, true, true)) {
     if (n.CallExpression.check(expr.node)) {
-      if (!isCallStackPure(expr.node)) {
+      if (!isCallStackPure(expr as any)) {
         return false;
       }
     }
@@ -202,6 +227,7 @@ const knownStackPureFunctions = [
   "$f",
   "$forall_it",
   "$aload_it",
+  "$id",
   // TODO: Add the rest of those functions
   "$$.setcolor",
   "$$.moveto",
@@ -213,6 +239,13 @@ const knownStackPureFunctions = [
   "$$.save",
   "$$.translate",
   "$$.scale",
+  "$$.show",
+  "$$.selectfont",
+  "$$.stringwidth",
+  "$$.charpath",
+  "$$.restore",
+  "$$.currpos",
+  "$$.pathbbox",
   {
     callee: "$a",
     extraTest(node: n.CallExpression) {
@@ -221,18 +254,88 @@ const knownStackPureFunctions = [
   },
 ];
 
-const impureCalls = new Map<string, number>();
-function isCallStackPure(callExpr: n.CallExpression) {
-  const callee = print(callExpr.callee as any).code;
-  const isStackPure = knownStackPureFunctions.find((t) =>
-    typeof t === "string"
-      ? t === callee
-      : t.callee === callee && t.extraTest(callExpr)
-  );
-  if (!isStackPure) {
-    impureCalls.set(callee, (impureCalls.get(callee) ?? 0) + 1);
+const knowStackImpureFunctions = [
+  "$d",
+  "$forall",
+  "$aload",
+  "$search",
+  "$cleartomark",
+  "$counttomark",
+  "$astore",
+
+  // Parts of header functions which probably should just be skipped
+  "$k.splice",
+];
+
+function findFunctionBody(
+  path: NodePath,
+  fnName: string
+): NodePath | undefined {
+  let scopePath: NodePath | null = path;
+  while (scopePath !== null) {
+    if (
+      !n.BlockStatement.check(scopePath.value) &&
+      !n.Program.check(scopePath.value)
+    ) {
+      scopePath = scopePath.parentPath;
+      continue;
+    }
+    const body = scopePath.node.body;
+    for (let i = 0; i < body.length; ++i) {
+      const stmtNode = body[i];
+      if (n.FunctionDeclaration.check(stmtNode)) {
+        if (stmtNode.id && print(stmtNode.id).code === fnName) {
+          return scopePath.get("body").get(i).get("body");
+        }
+      }
+      const leftStr = findAssignemntOrDeclLeft(stmtNode);
+      if (leftStr === fnName) {
+        const rightNode = findRightNode(stmtNode);
+        if (!rightNode) throw new Error("Something is wrong");
+        if (
+          n.FunctionExpression.check(rightNode) ||
+          n.ArrowFunctionExpression.check(rightNode)
+        ) {
+          return findRightPath(scopePath.get("body").get(i)).get("body");
+        }
+      }
+    }
+    scopePath = scopePath.parentPath;
   }
-  return isStackPure;
+}
+
+const impureCalls = new Map<string, number>();
+function isCallStackPure(callExpr: NodePath<n.CallExpression>) {
+  const callee = print(callExpr.node.callee as any).code;
+  const knowStackPurity = knownStackPureFunctions.find((t) =>
+    typeof t === "string" ? t === callee : t.callee === callee
+  );
+  if (knowStackPurity) {
+    return typeof knowStackPurity === "string"
+      ? true
+      : knowStackPurity.extraTest(callExpr.node);
+  }
+
+  if (knowStackImpureFunctions.includes(callee)) return false;
+
+  // console.log("CHECKING", callee);
+
+  // // Dev helper: This makes sure all the paths passed to the `isCallStackPure` are globally rooted
+  // const root = findRoot(callExpr);
+  // if (root.type !== "File") {
+  //   console.log(findPathNames(callExpr).join("__"), root.type);
+  //   throw new Error("INCORRECT PATH!");
+  // }
+
+  // Attempt to find the body of the function and identify if it's stack pure
+  // const functionBody = findFunctionBody(callExpr.parentPath, callee);
+  // if (functionBody && isStatementStackPure(functionBody)) {
+  //   // console.log("SKIPPING OVER STACK PURE FUNCTION!", callee);
+  //   return true;
+  // }
+
+  impureCalls.set(callee, (impureCalls.get(callee) ?? 0) + 1);
+  return false;
 }
 
 export function* iterateOverStackPureExpressions(
@@ -251,7 +354,7 @@ export function* iterateOverStackPureExpressions(
     }
 
     if (n.CallExpression.check(expr.node)) {
-      if (!isCallStackPure(expr.node)) break;
+      if (!isCallStackPure(expr as any)) break;
     }
     yield expr;
   }
@@ -328,7 +431,10 @@ function findPopEliminate(expr: NodePath) {
     return {
       count: 1,
       skipMinusMinusJ: true,
-      eliminate: (variableName: string) => replace(expr, `${variableName}`),
+      eliminate: (variableName: string) => {
+        replace(expr, `${variableName}`);
+        expr.parentPath && cleanupMembershipExpression(expr.parentPath);
+      },
     };
   }
 
@@ -389,7 +495,7 @@ export function getPushedValue(node: n.ExpressionStatement) {
 
 export function replace(path: NodePath, rawCode: string) {
   const ast = (parse(`${rawCode}`) as n.File).program.body;
-  path.replace(...ast);
+  return path.replace(...ast);
 }
 
 export function insertBefore(path: NodePath, rawCode: string) {
@@ -400,6 +506,55 @@ export function insertBefore(path: NodePath, rawCode: string) {
 export function insertAfter(path: NodePath, rawCode: string) {
   const ast = (parse(`${rawCode}`) as n.File).program.body;
   path.insertAfter(...ast);
+}
+
+function findRightPath(nodePath: NodePath) {
+  const node = nodePath.node;
+  if (
+    n.ExpressionStatement.check(node) &&
+    n.AssignmentExpression.check(node.expression)
+  ) {
+    return nodePath.get("expression").get("right");
+  }
+  if (n.VariableDeclaration.check(node)) {
+    const declr = node.declarations[0];
+    if (!n.VariableDeclarator.check(declr)) return null;
+    if (!declr.init) return null;
+    return nodePath.get("declarations").get(0).get("init");
+  }
+  return null;
+}
+
+function findAssignemntOrDeclLeft(node: n.Statement) {
+  if (
+    n.ExpressionStatement.check(node) &&
+    n.AssignmentExpression.check(node.expression)
+  ) {
+    return print(node.expression.left).code;
+  }
+  if (n.VariableDeclaration.check(node)) {
+    const declr = node.declarations[0];
+    if (!n.VariableDeclarator.check(declr)) return null;
+    if (!declr.init) return null;
+    return print(declr.id).code;
+  }
+  return null;
+}
+
+export function findRightNode(node: n.Statement) {
+  if (
+    n.ExpressionStatement.check(node) &&
+    n.AssignmentExpression.check(node.expression)
+  ) {
+    return node.expression.right;
+  }
+  if (n.VariableDeclaration.check(node)) {
+    const declr = node.declarations[0];
+    if (!n.VariableDeclarator.check(declr)) return null;
+    if (!declr.init) return null;
+    return declr.init;
+  }
+  return null;
 }
 
 export function findLeftRight(node: n.Statement) {
@@ -424,4 +579,33 @@ export function findLeftRight(node: n.Statement) {
     };
   }
   return null;
+}
+
+export function cleanupMembershipExpression(path: NodePath) {
+  if (!n.MemberExpression.check(path.node)) return;
+
+  // Reparse the node since to normalize the type of the property
+  const [newPath] = path.replace(
+    parse(print(path.node).code).program.body[0].expression
+  );
+
+  if (
+    n.Literal.check(newPath.node.property) &&
+    typeof newPath.node.property.value === "string" &&
+    canBeUsedAsSimpleMemberProperty(newPath.node.property.value)
+  ) {
+    console.log("Cleaning up membership expression", print(newPath.node).code);
+    newPath.node.computed = false;
+    newPath.node.property = b.identifier(newPath.node.property.value);
+  }
+}
+
+function canBeUsedAsSimpleMemberProperty(str: string) {
+  const simpleStr = str.replace(/^"/, "").replace(/"$/, "");
+  try {
+    eval(`({}).${simpleStr}`);
+  } catch (err) {
+    return false;
+  }
+  return true;
 }

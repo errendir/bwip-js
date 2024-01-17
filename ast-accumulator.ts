@@ -16,7 +16,8 @@ export function simplifyIfForAccumulator(tree: n.Node) {
   findInTree(tree, n.Statement, (ifForPath) => {
     if (
       !n.IfStatement.check(ifForPath.node) &&
-      !n.ForStatement.check(ifForPath.node)
+      !n.ForStatement.check(ifForPath.node) &&
+      !n.ForOfStatement.check(ifForPath.node)
     )
       return;
     // TODO: Handle the if else statements too
@@ -31,6 +32,8 @@ export function simplifyIfForAccumulator(tree: n.Node) {
 
     const bodyPath = n.IfStatement.check(ifForPath.node)
       ? ifForPath.get("consequent")
+      : n.ForStatement.check(ifForPath.node)
+      ? ifForPath.get("body")
       : ifForPath.get("body");
 
     // TODO: Analyze one-liner blocks too

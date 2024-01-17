@@ -23,17 +23,50 @@ export function extractFnParamsAndReturns(tree: n.Node) {
       return;
     }
 
-    const innerFnPaths: NodePath<n.ExpressionStatement>[] = [];
-    const functionsToProcess = findInTree(
-      fnPath.node,
-      n.ExpressionStatement,
-      (innerFnPath) => {
-        if (!n.AssignmentExpression.check(innerFnPath.node.expression)) return;
-        if (!n.FunctionExpression.check(innerFnPath.node.expression.right))
-          return;
-        innerFnPaths.push(innerFnPath);
+    // The functions whose names also show up as string literals can be dynamically accessed, we must be careful optimizing them
+    const strLiterals = new Set<string>();
+    findInTree(fnPath, n.Literal, (strLit) => {
+      if (typeof strLit.node.value !== "string") return;
+      strLiterals.add(strLit.node.value);
+    });
+
+    const innerFnPaths: {
+      fnPath: NodePath<n.ExpressionStatement>;
+      fnBody: NodePath<n.BlockStatement>;
+      oldFnName: string;
+      newFnName: string;
+    }[] = [];
+    findInTree(fnPath, n.ExpressionStatement, (innerFnPath) => {
+      if (!n.AssignmentExpression.check(innerFnPath.node.expression)) return;
+      if (!n.FunctionExpression.check(innerFnPath.node.expression.right))
+        return;
+
+      let rawFnName: string;
+      let betterFnName: string;
+      rawFnName = print(innerFnPath.node.expression.left).code;
+      if (!rawFnName.startsWith("$_."))
+        throw new Error("Unexpected fn name " + rawFnName);
+      betterFnName = rawFnName.replace("$_.", "");
+
+      if (innerFnPath.node.expression.right.params.length > 0) {
+        console.log("Function already has parameters, skipping...", rawFnName);
       }
-    );
+
+      if (strLiterals.has(betterFnName)) {
+        console.log(
+          "TODO: Don't give up on dynamically referenced fn",
+          betterFnName
+        );
+        return;
+      }
+
+      innerFnPaths.push({
+        fnPath: innerFnPath,
+        fnBody: innerFnPath.get("expression").get("right").get("body"),
+        oldFnName: rawFnName,
+        newFnName: betterFnName,
+      });
+    });
 
     editCount += processFunctionsInScope(fnPath, innerFnPaths);
   });
@@ -42,108 +75,82 @@ export function extractFnParamsAndReturns(tree: n.Node) {
 
 function processFunctionsInScope(
   scope: NodePath,
-  innerFnPaths: NodePath<n.ExpressionStatement>[]
+  innerFnPaths: {
+    fnPath: NodePath<n.ExpressionStatement>;
+    fnBody: NodePath<n.BlockStatement>;
+    oldFnName: string;
+    newFnName: string;
+  }[]
 ) {
   let editCount = 0;
-  // The functions whose names also show up as string literals can be dynamically accessed, we must be careful optimizing them
-  const strLiterals = new Set<string>();
-  findInTree(scope.node, n.Literal, (strLit) => {
-    if (typeof strLit.node.value !== "string") return;
-    strLiterals.add(strLit.node.value);
-  });
 
   const fnNameToArityMap = new Map<
     string,
-    { betterFnName: string; inCount: number; outCount: number }
+    { newFnName: string; inCount: number; outCount: number }
   >();
 
-  innerFnPaths.forEach((innerFnPath) => {
-    let rawFnName: string;
-    let betterFnName: string;
-    if (
-      n.AssignmentExpression.check(innerFnPath.node.expression) &&
-      n.FunctionExpression.check(innerFnPath.node.expression.right)
-    ) {
-      rawFnName = print(innerFnPath.node.expression.left).code;
-      if (!rawFnName.startsWith("$_."))
-        throw new Error("Unexpected fn name " + rawFnName);
-      betterFnName = rawFnName.replace("$_.", "");
-    } else {
-      throw new Error("Incorrect ");
-    }
+  innerFnPaths.forEach(
+    ({ fnPath: innerFnPath, fnBody, oldFnName, newFnName }) => {
+      let { leadingPops, trailingPushes } =
+        findLeadingPopsAndTrailingPushes(fnBody);
 
-    if (innerFnPath.node.expression.right.params.length > 0) {
-      console.log("Function already has parameters, skipping...", rawFnName);
-    }
-
-    if (strLiterals.has(betterFnName)) {
       console.log(
-        "TODO: Don't give up on dynamically referenced fn",
-        betterFnName
+        "Found inner fn declaration with arity",
+        oldFnName,
+        leadingPops.length,
+        trailingPushes.length
       );
-      return;
-    }
 
-    let { leadingPops, trailingPushes } = findLeadingPopsAndTrailingPushes(
-      innerFnPath.get("expression").get("right").get("body")
-    );
-
-    console.log(
-      "Found inner fn declaration with arity",
-      rawFnName,
-      leadingPops.length,
-      trailingPushes.length
-    );
-
-    if (trailingPushes.length > 1) {
-      console.log(
-        "Cannot handle returning multiple values in fn (returning only the last one)",
-        rawFnName
-      );
-      trailingPushes = trailingPushes.slice(-1);
-    }
-
-    fnNameToArityMap.set(rawFnName, {
-      betterFnName,
-      inCount: leadingPops.length,
-      outCount: trailingPushes.length,
-    });
-
-    if (trailingPushes[0]) {
-      replace(
-        trailingPushes[0].path,
-        `return ${print(trailingPushes[0].val).code};\n`
-      );
-    }
-
-    const newArguments = leadingPops.map((leadingPop) => {
-      const variableName = genVariable();
-      leadingPop.eliminate(variableName);
-      if (leadingPop.count > 1)
-        throw new Error(
-          "TODO: Implement this - arity needs to correctly reflect how many pops are made"
+      if (trailingPushes.length > 1) {
+        console.log(
+          "Cannot handle returning multiple values in fn (returning only the last one)",
+          oldFnName
         );
-      return { variableName };
-    });
+        trailingPushes = trailingPushes.slice(-1);
+      }
 
-    editCount++;
+      fnNameToArityMap.set(oldFnName, {
+        newFnName,
+        inCount: leadingPops.length,
+        outCount: trailingPushes.length,
+      });
 
-    // innerFnPath
-    //   .get("expression")
-    //   .get("right")
-    //   .get("params")
-    //   .replace(newArguments.map((a) => a.variableName));
+      if (trailingPushes[0]) {
+        replace(
+          trailingPushes[0].path,
+          `return ${print(trailingPushes[0].val).code};\n`
+        );
+      }
 
-    // Alternative, bugs out
-    replace(
-      innerFnPath,
-      `var ${betterFnName} = function(${newArguments
-        .map((a) => a.variableName)
-        .join(", ")}) ` +
-        print(innerFnPath.node.expression.right.body).code +
-        ";\n"
-    );
-  });
+      const newArguments = leadingPops.map((leadingPop) => {
+        const variableName = genVariable();
+        leadingPop.eliminate(variableName);
+        if (leadingPop.count > 1)
+          throw new Error(
+            "TODO: Implement this - arity needs to correctly reflect how many pops are made"
+          );
+        return { variableName };
+      });
+
+      editCount++;
+
+      // innerFnPath
+      //   .get("expression")
+      //   .get("right")
+      //   .get("params")
+      //   .replace(newArguments.map((a) => a.variableName));
+
+      // Alternative, bugs out
+      replace(
+        innerFnPath,
+        `var ${newFnName} = function(${newArguments
+          .map((a) => a.variableName)
+          .join(", ")}) ` +
+          print(fnBody.node).code +
+          ";\n"
+      );
+    }
+  );
 
   // Replace all the call sites of the processed functions
   findInTree(scope.node, n.ExpressionStatement, (callPath) => {
@@ -171,13 +178,10 @@ function processFunctionsInScope(
     const varString = varNames.join(", ");
     if (arity.outCount > 0) {
       const tmpVar = genVariable();
-      replace(
-        callPath,
-        `var ${tmpVar} = ${arity.betterFnName}(${varString});\n`
-      );
+      replace(callPath, `var ${tmpVar} = ${arity.newFnName}(${varString});\n`);
       insertAfter(callPath, `$k[$j++] = ${tmpVar};\n`);
     } else {
-      replace(callPath, `${arity.betterFnName}(${varString});\n`);
+      replace(callPath, `${arity.newFnName}(${varString});\n`);
     }
   });
 

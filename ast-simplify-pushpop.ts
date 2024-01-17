@@ -7,16 +7,17 @@ import {
   findNextStatement,
   genVariable,
   getPushedValue,
-  iterateOverStackPureExpressions,
   replace,
 } from "./ast-helpers";
+import { NodePath } from "ast-types/lib/node-path";
 
 export function simplifyLongDistancePushPops(tree: n.Node) {
   let simplifyCount = 0;
 
-  findInTree(tree, n.ExpressionStatement, (thisPath) => {
-    if (!n.AssignmentExpression.check(thisPath.node.expression)) return;
-    if (print(thisPath.node.expression.left).code !== "$k[$j++]") return;
+  findInTree(tree, n.AssignmentExpression, (assignmentPath) => {
+    if (print(assignmentPath.node.left).code !== "$k[$j++]") return;
+    const thisPath = assignmentPath.parentPath as NodePath;
+    if (!n.ExpressionStatement.check(thisPath.node)) return;
 
     // findLeadingPopsFrom
     const leadingPop = findLeadingPopsFrom(thisPath, false)[0];
@@ -26,7 +27,7 @@ export function simplifyLongDistancePushPops(tree: n.Node) {
     leadingPop.eliminate(variableName);
     replace(
       thisPath,
-      `var ${variableName} = ${print(thisPath.node.expression.right).code};\n`
+      `var ${variableName} = ${print(assignmentPath.node.right).code};\n`
     );
     simplifyCount++;
   });

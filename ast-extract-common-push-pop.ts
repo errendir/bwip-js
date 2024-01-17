@@ -7,7 +7,6 @@ import {
   genVariable,
   insertAfter,
   insertBefore,
-  iterateOverStackPureExpressions,
   replace,
 } from "./ast-helpers";
 import { NodePath } from "ast-types/lib/node-path";

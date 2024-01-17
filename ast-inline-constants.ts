@@ -1,7 +1,8 @@
 import { print } from "recast";
-import { namedTypes as n } from "ast-types";
+import { namedTypes as n, visit, builders as b } from "ast-types";
 
 import {
+  cleanupMembershipExpression,
   findInTree,
   findLeftRight,
   findNextStatement,
@@ -31,19 +32,31 @@ export function inlineConstants(tree: n.Node) {
     // Don't inline BWIPP_VERSION
     if (variableDecl.name === "BWIPP_VERSION") return;
 
+    // console.log("INLINING", variableDecl.name);
+
+    const litNode = variableDecl.init;
     const litValue = print(variableDecl.init).code;
     if (litValue !== "Infinity" && !n.Literal.check(variableDecl.init)) return;
 
     let next = findNextStatement(thisPath);
-    while (true) {
-      if (!next) break;
+    while (next) {
       const { node, path } = next;
 
-      // Stop on statements we cannot analyze in-depth yet
-      if (n.IfStatement.check(node)) break;
       if (n.WhileStatement.check(node)) break;
-      if (n.ForStatement.check(node)) break;
-      if (n.ForAwaitStatement.check(node)) break;
+
+      // Continue past the if and for only when the identifier doesn't show up in the body
+      let stop = false;
+      if (n.IfStatement.check(node)) {
+        findInTree(node.consequent, n.Identifier, (id) => {
+          if (id.node.name === variableDecl.name) stop = true;
+        });
+      }
+      if (n.ForStatement.check(node)) {
+        findInTree(node.body, n.Identifier, (id) => {
+          if (id.node.name === variableDecl.name) stop = true;
+        });
+      }
+      if (stop) break;
 
       // Stop on redeclaration or reassignment of the same variable
       const leftRight = findLeftRight(node);
@@ -53,7 +66,8 @@ export function inlineConstants(tree: n.Node) {
 
       findInTree(node, n.Identifier, (idPath) => {
         if (idPath.node.name === variableDecl.name) {
-          replace(idPath, litValue);
+          idPath.replace(litNode);
+          idPath.parentPath && cleanupMembershipExpression(idPath.parentPath);
         }
       });
 
