@@ -528,29 +528,31 @@ function $eq(a, b) {
     return a == b;
   }
 
-function* $aload_it(a) {
-    const o = a.o;
-    const lim = a.o + a.length;
-    for (let i=o; i<lim; ++i) {
-        yield a.b[i];
-    }
+function $aload_it(a) {
+    if (a.o === 0 && a.b.length === a.length) return a.b;
+    return a.b.slice(a.o, a.o+a.length)
 }
 
-function* $forall_it(o) {
+function $forall_it(o) {
     if (o instanceof ArrayView) {
-        // The array may be a view.
-        for (var a = o.b, i = o.o, l = o.o + o.length; i < l; i++) {
-            yield a[i];
-        }
-    } else if (o instanceof Uint8Array) {
-        for (var i = 0, l = o.length; i < l; i++) {
-            yield o[i];
-        }
+        // return o.getRawArray();
+        if (o.o === 0 && o.b.length === o.length) return o.b;
+        return o.b.slice(o.o, o.o+o.length)
+    } 
+    return $forall_it_2(o);
+}
+
+function $forall_it_2(o) {
+    if (o instanceof Uint8Array) {
+        return o;
     } else if (typeof o === 'string') {
-        for (var i = 0, l = o.length; i < l; i++) {
-            yield o.charCodeAt(i);
-        }
-    } else if (o instanceof Map) {
+        return o
+    }
+    return $forall_it_3(o);
+}
+
+function* $forall_it_3(o) {
+    if (o instanceof Map) {
         for (var keys = o.keys(), i = 0, l = o.size; i < l; i++) {
             var id = keys.next().value;
             // yield id;
@@ -565,6 +567,44 @@ function* $forall_it(o) {
         }
     }
 }
+
+// function* $aload_it(a) {
+//     const o = a.o;
+//     const lim = a.o + a.length;
+//     for (let i=o; i<lim; ++i) {
+//         yield a.b[i];
+//     }
+// }
+
+// function* $forall_it(o) {
+//     if (o instanceof ArrayView) {
+//         // The array may be a view.
+//         for (var a = o.b, i = o.o, l = o.o + o.length; i < l; i++) {
+//             yield a[i];
+//         }
+//     } else if (o instanceof Uint8Array) {
+//         for (var i = 0, l = o.length; i < l; i++) {
+//             yield o[i];
+//         }
+//     } else if (typeof o === 'string') {
+//         for (var i = 0, l = o.length; i < l; i++) {
+//             yield o.charCodeAt(i);
+//         }
+//     } else if (o instanceof Map) {
+//         for (var keys = o.keys(), i = 0, l = o.size; i < l; i++) {
+//             var id = keys.next().value;
+//             // yield id;
+//             $k[$j++] = id;
+//             yield o.get(id);
+//         }
+//     } else {
+//         for (var id in o) {
+//             // yield id;
+//             $k[$j++] = id;
+//             yield o[id];
+//         }
+//     }
+// }
 
 function $ne(a, b) {
     return !$eq(a, b);
