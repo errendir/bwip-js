@@ -1,25 +1,55 @@
 import { parse, print } from "recast";
-import { namedTypes as n, builders as b, visit } from "ast-types";
+import {
+  namedTypes as n,
+  builders as b,
+  visit,
+  Visitor,
+  PathVisitor,
+  Path,
+} from "ast-types";
 import { NodePath } from "ast-types/lib/node-path";
 
 import { Type } from "ast-types/lib/types";
+import { ExpressionKind } from "ast-types/lib/gen/kinds";
+import { printOutTree } from "./ast-printout";
 
 export function findInTree<N>(
   tree: n.Node | NodePath,
   nodeType: Type<N>,
   callback: (path: NodePath<N>) => void
 ) {
-  const treeNode = n.Node.check(tree) ? tree : tree.node;
-  const pathToPrepend = n.Node.check(tree) ? null : tree;
-  visit(treeNode, {
+  if (!n.Node.check(tree) && tree.node !== tree.value) {
+    throw new Error("Please provide only paths to nodes");
+  }
+  // visit actually does take the path argument! the types are wrong
+  visit(tree as any, {
     ["visit" + nodeType.toString()]: function (path) {
       if (!nodeType.check(path.node)) throw new Error("BROKEN!");
-      const fullPath = pathToPrepend ? joinPaths(pathToPrepend, path) : path;
-      callback(fullPath as any);
+      callback(path);
       this.traverse(path);
     },
   });
 }
+
+// export function findInTree<N>(
+//   tree: n.Node | NodePath,
+//   nodeType: Type<N>,
+//   callback: (path: NodePath<N>) => void
+// ) {
+//   if (!n.Node.check(tree) && tree.node !== tree.value) {
+//     throw new Error("Please provide only paths to nodes");
+//   }
+//   const treeNode = n.Node.check(tree) ? tree : tree.node;
+//   const pathToPrepend = n.Node.check(tree) ? null : tree;
+//   visit(treeNode, {
+//     ["visit" + nodeType.toString()]: function (path) {
+//       if (!nodeType.check(path.node)) throw new Error("BROKEN!");
+//       const fullPath = pathToPrepend ? joinPaths(pathToPrepend, path) : path;
+//       callback(fullPath as any);
+//       this.traverse(path);
+//     },
+//   });
+// }
 
 let freeVariable: number | null = null;
 export const initVariables = (tree: n.Node) => {
@@ -30,7 +60,6 @@ export const initVariables = (tree: n.Node) => {
     .map((id) => id.match(/_v([^=\s_]+)/))
     .filter((m) => !!m);
   const allVars = allVarsRaw.map((v) => parseInt(v![1], 36));
-  console.log(JSON.stringify({ raw: allVarsRaw.map((v) => v![0]), allVars }));
   const maxVar = Math.max(...allVars, 0);
   if (isNaN(maxVar))
     throw new Error(
@@ -87,11 +116,24 @@ function findRoot(path: NodePath) {
 }
 
 function joinPaths(path1: NodePath, path2: NodePath) {
+  console.log("pathNames1", findPathNames(path1));
+  console.log("pathNames2", findPathNames(path2));
   const names = findPathNames(path2).slice(2);
+  const totalPath = findPathNames(path1);
+
+  let newPath = path1;
   for (const name of names) {
-    path1 = path1.get(name);
+    newPath = newPath.get(name);
+    totalPath.push(name);
+    if (newPath.value === undefined) {
+      console.log("root1");
+      printOutTree(findAllParents(path1)[1].value, "");
+      console.log("root2");
+      printOutTree(findAllParents(path2)[1].value, "");
+      throw new Error("There is nothing at the path " + totalPath.join(", "));
+    }
   }
-  return path1;
+  return newPath;
 }
 
 /** Takes a path to some statement */
@@ -112,11 +154,11 @@ function* iterateOverExpressions(
     //   print(currentStmt.node).code
     // );
 
-    function* visitExprs(node: n.Node, prefixPath: NodePath) {
-      visit(node, {
+    function* visitExprs(nodePath: NodePath) {
+      visit(nodePath as any, {
         visitExpression(path) {
           // console.log("EXPR", j(path.node as any).toSource(), path.node.type);
-          exprs.push(joinPaths(prefixPath, path as any));
+          exprs.push(path);
           this.traverse(path);
         },
       });
@@ -124,7 +166,7 @@ function* iterateOverExpressions(
     }
 
     if (n.IfStatement.check(currentStmt.node)) {
-      yield* visitExprs(currentStmt.node.test, currentStmt.path.get("test"));
+      yield* visitExprs(currentStmt.path.get("test"));
       if (!isStatementStackPure(currentStmt.path.get("consequent"))) return;
       if (
         currentStmt.node.alternate &&
@@ -134,21 +176,18 @@ function* iterateOverExpressions(
     }
     if (n.ForStatement.check(currentStmt.node)) {
       if (currentStmt.node.init) {
-        yield* visitExprs(currentStmt.node.init, currentStmt.path.get("init"));
+        yield* visitExprs(currentStmt.path.get("init"));
       }
       if (!isStatementStackPure(currentStmt.path.get("body"))) return;
     }
     if (n.ForOfStatement.check(currentStmt.node)) {
       if (currentStmt.node.right) {
-        yield* visitExprs(
-          currentStmt.node.right,
-          currentStmt.path.get("right")
-        );
+        yield* visitExprs(currentStmt.path.get("right"));
       }
       if (!isStatementStackPure(currentStmt.path.get("body"))) return;
     }
 
-    yield* visitExprs(currentStmt.node, currentStmt.path);
+    yield* visitExprs(currentStmt.path);
 
     currentStmt = justThisStatement
       ? null
@@ -328,11 +367,11 @@ function isCallStackPure(callExpr: NodePath<n.CallExpression>) {
   // }
 
   // Attempt to find the body of the function and identify if it's stack pure
-  // const functionBody = findFunctionBody(callExpr.parentPath, callee);
-  // if (functionBody && isStatementStackPure(functionBody)) {
-  //   // console.log("SKIPPING OVER STACK PURE FUNCTION!", callee);
-  //   return true;
-  // }
+  const functionBody = findFunctionBody(callExpr.parentPath, callee);
+  if (functionBody && isStatementStackPure(functionBody)) {
+    // console.log("SKIPPING OVER STACK PURE FUNCTION!", callee);
+    return true;
+  }
 
   impureCalls.set(callee, (impureCalls.get(callee) ?? 0) + 1);
   return false;
@@ -400,7 +439,7 @@ export function findLeadingPopsAndTrailingPushes(
   path: NodePath<n.BlockStatement>
 ) {
   const leadingPops = findLeadingPopsFrom(path.get("body").get(0), true);
-  const trailingPushes: { path: NodePath; val: n.Node }[] = [];
+  const trailingPushes: { path: NodePath; val: ExpressionKind }[] = [];
 
   const lastStmt: NodePath = path.get("body").get(path.node.body.length - 1);
   let line: { node: n.Node; path: NodePath } | null = {
@@ -425,14 +464,14 @@ export function findLeadingPopsAndTrailingPushes(
   return { leadingPops, trailingPushes };
 }
 
-function findPopEliminate(expr: NodePath) {
+function findPopEliminate(expr: NodePath<n.Expression>) {
   const exprString = print(expr.node as n.Node).code;
   if (exprString === "$k[--$j]") {
     return {
       count: 1,
       skipMinusMinusJ: true,
       eliminate: (variableName: string) => {
-        replace(expr, `${variableName}`);
+        expr.replace(b.identifier(variableName));
         expr.parentPath && cleanupMembershipExpression(expr.parentPath);
       },
     };
@@ -493,19 +532,46 @@ export function getPushedValue(node: n.ExpressionStatement) {
   return node.expression.right;
 }
 
+const tracker = new WeakMap<any, string>();
+
+export function findNodeCreator(node: NodePath) {
+  const val = tracker.get(node);
+  if (val) return val;
+  for (const par of findAllParents(node).reverse()) {
+    const val = tracker.get(par.value);
+    if (val) return val;
+  }
+  return null;
+}
+
 export function replace(path: NodePath, rawCode: string) {
   const ast = (parse(`${rawCode}`) as n.File).program.body;
+  tracker.set(ast, new Error().stack ?? "");
   return path.replace(...ast);
 }
 
 export function insertBefore(path: NodePath, rawCode: string) {
   const ast = (parse(`${rawCode}`) as n.File).program.body;
+  tracker.set(ast, new Error().stack ?? "");
   path.insertBefore(...ast);
 }
 
 export function insertAfter(path: NodePath, rawCode: string) {
   const ast = (parse(`${rawCode}`) as n.File).program.body;
+  tracker.set(ast, new Error().stack ?? "");
   path.insertAfter(...ast);
+}
+
+export function reparseExpression(path: NodePath) {
+  return path.replace(parse(print(path.node).code).program.body[0].expression);
+}
+
+export function reparseParentStatemet(path: NodePath) {
+  while (!n.Statement.check(path.value) && !!path) {
+    path = path.parentPath;
+  }
+  if (!path) return;
+  const [newpath] = path.replace(parse(print(path.value).code).program.body[0]);
 }
 
 function findRightPath(nodePath: NodePath) {
@@ -585,9 +651,7 @@ export function cleanupMembershipExpression(path: NodePath) {
   if (!n.MemberExpression.check(path.node)) return;
 
   // Reparse the node since to normalize the type of the property
-  const [newPath] = path.replace(
-    parse(print(path.node).code).program.body[0].expression
-  );
+  const [newPath] = reparseExpression(path);
 
   if (
     n.Literal.check(newPath.node.property) &&
@@ -608,4 +672,14 @@ function canBeUsedAsSimpleMemberProperty(str: string) {
     return false;
   }
   return true;
+}
+
+export function findAllParents(node: NodePath) {
+  const parents: NodePath[] = [];
+  let path: NodePath | null = node;
+  while (path !== null) {
+    parents.push(path);
+    path = path.parentPath;
+  }
+  return parents.reverse();
 }

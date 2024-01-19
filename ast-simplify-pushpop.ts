@@ -1,5 +1,5 @@
 import { print } from "recast";
-import { namedTypes as n } from "ast-types";
+import { namedTypes as n, builders as b } from "ast-types";
 
 import {
   findInTree,
@@ -7,6 +7,7 @@ import {
   findNextStatement,
   genVariable,
   getPushedValue,
+  reparseParentStatemet,
   replace,
 } from "./ast-helpers";
 import { NodePath } from "ast-types/lib/node-path";
@@ -25,10 +26,19 @@ export function simplifyLongDistancePushPops(tree: n.Node) {
 
     const variableName = genVariable();
     leadingPop.eliminate(variableName);
-    replace(
-      thisPath,
-      `var ${variableName} = ${print(assignmentPath.node.right).code};\n`
+    thisPath.replace(
+      b.variableDeclaration("var", [
+        b.variableDeclarator(
+          b.identifier(variableName),
+          assignmentPath.node.right
+        ),
+      ])
     );
+    // replace(
+    //   thisPath,
+    //   `var ${variableName} = ${print(assignmentPath.node.right).code};\n`
+    // );
+    // reparseParentStatemet(thisPath);
     simplifyCount++;
   });
 
@@ -67,7 +77,12 @@ export function simplifyPushPop(tree: n.Node) {
       //   console.log(print(node).code);
 
       pushPath.prune();
-      replace(path, `var ${id.name} = ${print(pushedValue).code};\n`);
+      // replace(path, `var ${id.name} = ${print(pushedValue).code};\n`);
+      path.replace(
+        b.variableDeclaration("var", [
+          b.variableDeclarator(b.identifier(id.name), pushedValue),
+        ])
+      );
 
       pushPopEditCount++;
       return true;

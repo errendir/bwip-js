@@ -2,6 +2,7 @@ import { print } from "recast";
 import { namedTypes as n } from "ast-types";
 
 import {
+  findAllParents,
   findInTree,
   findLeadingPopsAndTrailingPushes,
   findLeftRight,
@@ -108,16 +109,6 @@ function isChild(parent: NodePath, node: n.Node) {
   let found = false;
   findInTree(parent, n.Node, (n) => (found = n.node === node));
   return found;
-}
-
-function findAllParents(node: NodePath) {
-  const parents: NodePath[] = [];
-  let path: NodePath | null = node;
-  while (path !== null) {
-    parents.push(path);
-    path = path.parentPath;
-  }
-  return parents.reverse();
 }
 
 function findCommonParent(node1: NodePath, node2: NodePath) {

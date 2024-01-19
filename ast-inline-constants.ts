@@ -6,6 +6,9 @@ import {
   findInTree,
   findLeftRight,
   findNextStatement,
+  findNodeCreator,
+  printOutTree,
+  reparseParentStatemet,
   replace,
 } from "./ast-helpers";
 
@@ -22,6 +25,11 @@ function getVariableDecl(node: n.ASTNode) {
 export function inlineConstants(tree: n.Node) {
   let possibleCount = 0;
   let editCount = 0;
+
+  // findInTree(tree, n.VariableDeclaration, (thisPath) => {
+  //   reparseParentStatemet(thisPath);
+  // });
+
   findInTree(tree, n.VariableDeclaration, (thisPath) => {
     // Ignore the declaration in the for loop `init`s: they are likely to be mutated
     if (n.ForStatement.check(thisPath.parentPath.node)) return;
@@ -36,7 +44,10 @@ export function inlineConstants(tree: n.Node) {
 
     const litNode = variableDecl.init;
     const litValue = print(variableDecl.init).code;
-    if (litValue !== "Infinity" && !n.Literal.check(variableDecl.init)) return;
+
+    if (litValue !== "Infinity" && !n.Literal.check(variableDecl.init)) {
+      return;
+    }
 
     let next = findNextStatement(thisPath);
     while (next) {
@@ -50,8 +61,12 @@ export function inlineConstants(tree: n.Node) {
         findInTree(node.consequent, n.Identifier, (id) => {
           if (id.node.name === variableDecl.name) stop = true;
         });
+        node.alternate &&
+          findInTree(node.alternate, n.Identifier, (id) => {
+            if (id.node.name === variableDecl.name) stop = true;
+          });
       }
-      if (n.ForStatement.check(node)) {
+      if (n.ForStatement.check(node) || n.ForOfStatement.check(node)) {
         findInTree(node.body, n.Identifier, (id) => {
           if (id.node.name === variableDecl.name) stop = true;
         });
@@ -68,6 +83,7 @@ export function inlineConstants(tree: n.Node) {
         if (idPath.node.name === variableDecl.name) {
           idPath.replace(litNode);
           idPath.parentPath && cleanupMembershipExpression(idPath.parentPath);
+          editCount++;
         }
       });
 
@@ -83,7 +99,7 @@ export function inlineConstants(tree: n.Node) {
     }
     possibleCount++;
 
-    const originalDeclaration = print(thisPath.node).code;
+    const originalNode = thisPath.node;
     // Temporarily comment out the original declaration to make sure we don't count that identifier
     replace(thisPath, "throw new Error('this cannot be left in code');\n");
 
@@ -97,10 +113,9 @@ export function inlineConstants(tree: n.Node) {
 
     if (ids.has(variableDecl.name)) {
       // We must keep it, there is some other reference
-      //   console.log("KEEPING", variableDecl.name);
-      replace(thisPath, originalDeclaration + ";\n");
+      // console.log("KEEPING", variableDecl.name);
+      thisPath.replace(originalNode);
     } else {
-      editCount++;
       thisPath.prune();
     }
   });

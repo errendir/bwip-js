@@ -1,5 +1,5 @@
-import { print } from "recast";
-import { namedTypes as n } from "ast-types";
+import { print, parse } from "recast";
+import { namedTypes as n, builders as b } from "ast-types";
 
 import {
   findInTree,
@@ -10,9 +10,93 @@ import {
   insertBefore,
   replace,
 } from "./ast-helpers";
+
 import { NodePath } from "ast-types/lib/node-path";
 
-export function extractFnParamsAndReturns(tree: n.Node) {
+function findPotentialDynamicAccessLiterals(tree: n.Node) {
+  // The functions whose names also show up as string literals can be dynamically accessed, we must be careful optimizing them
+  // We can safetly ignore the literals that only appear as the first or second parameter to $eq(...)
+  const strLiterals = new Set<string>();
+  findInTree(tree, n.Literal, (strLit) => {
+    if (typeof strLit.node.value !== "string") return;
+    if (
+      strLit.parentPath.node &&
+      n.CallExpression.check(strLit.parentPath.node) &&
+      n.Identifier.check(strLit.parentPath.node.callee) &&
+      strLit.parentPath.node.callee.name === "$eq"
+    ) {
+      // console.log("SKIP",strLit.node.value,print(strLit.parentPath.node).code);
+      return;
+    }
+    strLiterals.add(strLit.node.value);
+  });
+  return strLiterals;
+}
+
+export function extractFnParamsAndReturnsInGlobalFns(tree: n.Node) {
+  let editCount = 0;
+
+  const strLiterals = findPotentialDynamicAccessLiterals(tree);
+  console.log({ strLiterals });
+
+  const exportedIds = new Set<string>();
+  // Don't refactor the global functions that are being exported
+  findInTree(tree, n.ExportNamedDeclaration, (expPath) => {
+    findInTree(expPath, n.Identifier, (idPath) => {
+      exportedIds.add(idPath.node.name);
+    });
+  });
+
+  const innerFnPaths: {
+    fnPath: NodePath<n.Statement>;
+    fnBody: NodePath<n.BlockStatement>;
+    fnOldArgs: string;
+    oldFnName: string;
+    newFnName: string;
+  }[] = [];
+
+  // Find all the top level functions and go through each one by one
+  findInTree(tree, n.FunctionDeclaration, (fnPath) => {
+    const pathNames = findPathNames(fnPath);
+    if (pathNames.length > 5) {
+      // The function is not top-level
+      console.log("SKIPPING", print(fnPath.node.id!).code);
+      return;
+    }
+
+    if (!fnPath.node.id) throw new Error("Unknow fn");
+    const name = print(fnPath.node.id).code;
+
+    if (strLiterals.has(name)) {
+      console.log("Skipping a potentially dynamically called fn", name);
+      return;
+    }
+    if (exportedIds.has(name)) {
+      console.log("Skipping an exported fn", name);
+      return;
+    }
+
+    innerFnPaths.push({
+      fnPath,
+      fnBody: fnPath.get("body"),
+      fnOldArgs: fnPath.node.params.map((p) => print(p).code).join(","),
+      oldFnName: name,
+      newFnName: name,
+    });
+  });
+
+  console.log(innerFnPaths.map((m) => m.newFnName));
+
+  return processFunctionsInScope(
+    tree,
+    innerFnPaths.filter(({ oldFnName }) =>
+      // !["$aload_it", "$forall_it", "bwipp_loadctx"].includes(oldFnName)
+      ["bwipp_raiseerror", "$astore"].includes(oldFnName)
+    )
+  );
+}
+
+export function extractFnParamsAndReturnsInLocalFns(tree: n.Node) {
   let editCount = 0;
 
   // Find all the top level functions and go through each one by one
@@ -23,16 +107,12 @@ export function extractFnParamsAndReturns(tree: n.Node) {
       return;
     }
 
-    // The functions whose names also show up as string literals can be dynamically accessed, we must be careful optimizing them
-    const strLiterals = new Set<string>();
-    findInTree(fnPath, n.Literal, (strLit) => {
-      if (typeof strLit.node.value !== "string") return;
-      strLiterals.add(strLit.node.value);
-    });
+    const strLiterals = findPotentialDynamicAccessLiterals(tree);
 
     const innerFnPaths: {
-      fnPath: NodePath<n.ExpressionStatement>;
+      fnPath: NodePath<n.Statement>;
       fnBody: NodePath<n.BlockStatement>;
+      fnOldArgs: string;
       oldFnName: string;
       newFnName: string;
     }[] = [];
@@ -48,10 +128,6 @@ export function extractFnParamsAndReturns(tree: n.Node) {
         throw new Error("Unexpected fn name " + rawFnName);
       betterFnName = rawFnName.replace("$_.", "");
 
-      if (innerFnPath.node.expression.right.params.length > 0) {
-        console.log("Function already has parameters, skipping...", rawFnName);
-      }
-
       if (strLiterals.has(betterFnName)) {
         console.log(
           "TODO: Don't give up on dynamically referenced fn",
@@ -60,24 +136,34 @@ export function extractFnParamsAndReturns(tree: n.Node) {
         return;
       }
 
+      // if (Math.random() > 0.1) return;
+
       innerFnPaths.push({
         fnPath: innerFnPath,
         fnBody: innerFnPath.get("expression").get("right").get("body"),
+        fnOldArgs: "",
         oldFnName: rawFnName,
         newFnName: betterFnName,
       });
     });
 
-    editCount += processFunctionsInScope(fnPath, innerFnPaths);
+    console.log(innerFnPaths.map(({ fnBody, fnPath, ...rest }) => rest));
+
+    editCount += processFunctionsInScope(
+      fnPath,
+      innerFnPaths
+      // innerFnPaths.filter(({ newFnName }) => newFnName === "NbeforeB")
+    );
   });
   return editCount;
 }
 
 function processFunctionsInScope(
-  scope: NodePath,
+  scope: NodePath | n.Node,
   innerFnPaths: {
-    fnPath: NodePath<n.ExpressionStatement>;
+    fnPath: NodePath<n.Statement>;
     fnBody: NodePath<n.BlockStatement>;
+    fnOldArgs: string;
     oldFnName: string;
     newFnName: string;
   }[]
@@ -90,7 +176,7 @@ function processFunctionsInScope(
   >();
 
   innerFnPaths.forEach(
-    ({ fnPath: innerFnPath, fnBody, oldFnName, newFnName }) => {
+    ({ fnPath: innerFnPath, fnBody, fnOldArgs, oldFnName, newFnName }) => {
       let { leadingPops, trailingPushes } =
         findLeadingPopsAndTrailingPushes(fnBody);
 
@@ -116,9 +202,8 @@ function processFunctionsInScope(
       });
 
       if (trailingPushes[0]) {
-        replace(
-          trailingPushes[0].path,
-          `return ${print(trailingPushes[0].val).code};\n`
+        trailingPushes[0].path.replace(
+          b.returnStatement(trailingPushes[0].val)
         );
       }
 
@@ -140,42 +225,45 @@ function processFunctionsInScope(
       //   .get("params")
       //   .replace(newArguments.map((a) => a.variableName));
 
-      // Alternative, bugs out
+      const args = [
+        ...newArguments.map((a) => a.variableName),
+        ...(fnOldArgs ? [fnOldArgs] : []),
+      ].join(",");
       replace(
         innerFnPath,
-        `var ${newFnName} = function(${newArguments
-          .map((a) => a.variableName)
-          .join(", ")}) ` +
-          print(fnBody.node).code +
-          ";\n"
+        `\nfunction ${newFnName}(${args}) ` + print(fnBody.node).code + ";\n"
       );
     }
   );
 
   // Replace all the call sites of the processed functions
-  findInTree(scope.node, n.ExpressionStatement, (callPath) => {
+  findInTree(scope, n.ExpressionStatement, (callPath) => {
     if (!n.CallExpression.check(callPath.node.expression)) return;
     const fnName = print(callPath.node.expression.callee).code;
     const arity = fnNameToArityMap.get(fnName);
     if (!arity) return;
+
+    if (!callPath.value) throw new Error("Broken value");
 
     const varNames = Array.from(new Array(arity.inCount), (_, i) =>
       genVariable()
     );
     for (const varName of varNames) {
       insertBefore(callPath, `var ${varName} = $k[--$j];\n`);
+      // callPath.insertBefore(
+      //   b.variableDeclaration("var", [
+      //     b.variableDeclarator(
+      //       b.identifier(varName),
+      //       parse("$k[--$j]").program.body[0].expression
+      //     ),
+      //   ])
+      // );
     }
 
-    // if (arity.outCount > 0) {
-    //   const tmpVar = genVariable();
-    //   replace(callPath, `var ${tmpVar} = ${fnName}(${varNames.join(", ")});\n`);
-    //   insertAfter(callPath, `$k[$j++] = ${tmpVar};\n`);
-    // } else {
-    //   replace(callPath, `${fnName}(${varNames.join(", ")});\n`);
-    // }
-
-    // Alternative
-    const varString = varNames.join(", ");
+    const varString = [
+      ...varNames,
+      ...callPath.node.expression.arguments.map((ar) => print(ar).code),
+    ].join(",");
     if (arity.outCount > 0) {
       const tmpVar = genVariable();
       replace(callPath, `var ${tmpVar} = ${arity.newFnName}(${varString});\n`);
