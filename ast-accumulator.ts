@@ -9,6 +9,7 @@ import {
   getPushedValue,
   insertAfter,
   replace,
+  findTrailingPushes,
 } from "./ast-helpers";
 
 export function simplifyIfForAccumulator(tree: n.Node) {
@@ -25,10 +26,9 @@ export function simplifyIfForAccumulator(tree: n.Node) {
 
     const prevStmt = findPrevStatement(ifForPath);
     if (!prevStmt) return;
-    if (!n.ExpressionStatement.check(prevStmt.node)) return;
-
-    const pushedValue = getPushedValue(prevStmt.node);
-    if (!pushedValue) return;
+    const pushesBehind = findTrailingPushes(prevStmt.path, true);
+    if (pushesBehind.length === 0) return;
+    const accPush = pushesBehind.slice(-1)[0];
 
     const bodyPath = n.IfStatement.check(ifForPath.node)
       ? ifForPath.get("consequent")
@@ -44,13 +44,16 @@ export function simplifyIfForAccumulator(tree: n.Node) {
     if (leadingPops.length > 0 && trailingPushes.length > 0) {
       const variableName = genVariable();
       replace(
-        prevStmt.path,
-        `var ${variableName} = ${print(pushedValue).code}\n`
+        accPush.path,
+        `var ${variableName} = ${print(accPush.val).code}\n`
       );
       leadingPops[0].eliminate(variableName);
       const lastPush = trailingPushes.slice(-1)[0]!;
-      replace(lastPush.path, `${variableName} = ${print(lastPush.val).code}\n`);
-      insertAfter(ifForPath, `$k[$j++] = ${variableName}\n`);
+      replace(
+        lastPush.path,
+        `${variableName} = ${print(lastPush.val).code};\n`
+      );
+      insertAfter(ifForPath, `$k[$j++] = ${variableName};\n`);
       editCount++;
     }
   });

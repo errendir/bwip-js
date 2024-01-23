@@ -5,6 +5,7 @@ import {
   findInTree,
   findLeadingPopsAndTrailingPushes,
   findPathNames,
+  findPotentialDynamicAccessLiterals,
   genVariable,
   insertAfter,
   insertBefore,
@@ -13,29 +14,7 @@ import {
 
 import { NodePath } from "ast-types/lib/node-path";
 
-function findPotentialDynamicAccessLiterals(tree: n.Node) {
-  // The functions whose names also show up as string literals can be dynamically accessed, we must be careful optimizing them
-  // We can safetly ignore the literals that only appear as the first or second parameter to $eq(...)
-  const strLiterals = new Set<string>();
-  findInTree(tree, n.Literal, (strLit) => {
-    if (typeof strLit.node.value !== "string") return;
-    if (
-      strLit.parentPath.node &&
-      n.CallExpression.check(strLit.parentPath.node) &&
-      n.Identifier.check(strLit.parentPath.node.callee) &&
-      strLit.parentPath.node.callee.name === "$eq"
-    ) {
-      // console.log("SKIP",strLit.node.value,print(strLit.parentPath.node).code);
-      return;
-    }
-    strLiterals.add(strLit.node.value);
-  });
-  return strLiterals;
-}
-
 export function extractFnParamsAndReturnsInGlobalFns(tree: n.Node) {
-  let editCount = 0;
-
   const strLiterals = findPotentialDynamicAccessLiterals(tree);
   console.log({ strLiterals });
 
@@ -91,7 +70,7 @@ export function extractFnParamsAndReturnsInGlobalFns(tree: n.Node) {
     tree,
     innerFnPaths.filter(({ oldFnName }) =>
       // !["$aload_it", "$forall_it", "bwipp_loadctx"].includes(oldFnName)
-      ["bwipp_raiseerror", "$astore"].includes(oldFnName)
+      ["bwipp_raiseerror", "bwipp_parseinput", "$astore"].includes(oldFnName)
     )
   );
 }
@@ -147,13 +126,9 @@ export function extractFnParamsAndReturnsInLocalFns(tree: n.Node) {
       });
     });
 
-    console.log(innerFnPaths.map(({ fnBody, fnPath, ...rest }) => rest));
+    // console.log(innerFnPaths.map(({ fnBody, fnPath, ...rest }) => rest));
 
-    editCount += processFunctionsInScope(
-      fnPath,
-      innerFnPaths
-      // innerFnPaths.filter(({ newFnName }) => newFnName === "NbeforeB")
-    );
+    editCount += processFunctionsInScope(fnPath, innerFnPaths);
   });
   return editCount;
 }
@@ -201,10 +176,22 @@ function processFunctionsInScope(
         outCount: trailingPushes.length,
       });
 
+      // Replace the last push with the return
+      const returnVar = genVariable();
       if (trailingPushes[0]) {
         trailingPushes[0].path.replace(
-          b.returnStatement(trailingPushes[0].val)
+          b.variableDeclaration("var", [
+            b.variableDeclarator(
+              b.identifier(returnVar),
+              trailingPushes[0].val
+            ),
+          ])
         );
+        // Add the bottom return statement
+        fnBody
+          .get("body")
+          .get(fnBody.node.body.length - 1)
+          .insertAfter(b.returnStatement(b.identifier(returnVar)));
       }
 
       const newArguments = leadingPops.map((leadingPop) => {

@@ -59,6 +59,47 @@ export function printOutTree(tree: n.Node, prefix: string, indent = 0) {
     printOutTree(tree.right, "right", indent + 1);
     return;
   }
+  if (n.LogicalExpression.check(tree)) {
+    console.log(prefixStr + tree.type);
+    console.log(reindent(print(tree).code));
+    printOutTree(tree.left, "left", indent + 1);
+    printOutTree(tree.right, "right", indent + 1);
+    return;
+  }
+  // Expressions
+  if (n.MemberExpression.check(tree)) {
+    console.log(prefixStr + tree.type);
+    console.log(reindent(print(tree).code));
+    printOutTree(tree.object, "object", indent + 1);
+    printOutTree(tree.property, "property", indent + 1);
+    return;
+  }
+  if (n.ArrayExpression.check(tree)) {
+    console.log(prefixStr + tree.type);
+    console.log(reindent(print(tree).code));
+    for (let i = 0; i < tree.elements.length; ++i) {
+      printOutTree(tree.elements[i]!, `${i}`, indent + 1);
+    }
+    return;
+  }
+  if (n.ObjectExpression.check(tree)) {
+    console.log(prefixStr + tree.type);
+    console.log(reindent(print(tree).code));
+    for (let i = 0; i < tree.properties.length; ++i) {
+      printOutTree(tree.properties[i]!, `${i}`, indent + 1);
+    }
+    return;
+  }
+  if (n.NewExpression.check(tree)) {
+    console.log(prefixStr + tree.type);
+    console.log(reindent(print(tree).code));
+    printOutTree(tree.callee, "callee", indent + 1);
+    for (let i = 0; i < tree.arguments.length; ++i) {
+      printOutTree(tree.arguments[i]!, `arguments.${i}`, indent + 1);
+    }
+
+    return;
+  }
 
   if (n.VariableDeclaration.check(tree)) {
     console.log(prefixStr + tree.type + print(tree).code);
@@ -103,6 +144,14 @@ export function printOutTree(tree: n.Node, prefix: string, indent = 0) {
     printOutTree(tree.body, "body", indent + 1);
     return;
   }
+  if (n.ForInStatement.check(tree)) {
+    console.log(prefixStr + tree.type);
+    console.log(reindent(print(tree).code));
+    tree.left && printOutTree(tree.left, "left", indent + 1);
+    tree.right && printOutTree(tree.right, "right", indent + 1);
+    printOutTree(tree.body, "body", indent + 1);
+    return;
+  }
   if (n.IfStatement.check(tree)) {
     console.log(prefixStr + tree.type);
     console.log(reindent(print(tree).code));
@@ -117,39 +166,8 @@ export function printOutTree(tree: n.Node, prefix: string, indent = 0) {
     tree.argument && printOutTree(tree.argument, "argument", indent + 1);
     return;
   }
-
-  // Expressions
-  if (n.MemberExpression.check(tree)) {
+  if (n.BreakStatement.check(tree)) {
     console.log(prefixStr + tree.type);
-    console.log(reindent(print(tree).code));
-    printOutTree(tree.object, "object", indent + 1);
-    printOutTree(tree.property, "property", indent + 1);
-    return;
-  }
-  if (n.ArrayExpression.check(tree)) {
-    console.log(prefixStr + tree.type);
-    console.log(reindent(print(tree).code));
-    for (let i = 0; i < tree.elements.length; ++i) {
-      printOutTree(tree.elements[i]!, `${i}`, indent + 1);
-    }
-    return;
-  }
-  if (n.ObjectExpression.check(tree)) {
-    console.log(prefixStr + tree.type);
-    console.log(reindent(print(tree).code));
-    for (let i = 0; i < tree.properties.length; ++i) {
-      printOutTree(tree.properties[i]!, `${i}`, indent + 1);
-    }
-    return;
-  }
-  if (n.NewExpression.check(tree)) {
-    console.log(prefixStr + tree.type);
-    console.log(reindent(print(tree).code));
-    printOutTree(tree.callee, "callee", indent + 1);
-    for (let i = 0; i < tree.arguments.length; ++i) {
-      printOutTree(tree.arguments[i]!, `arguments.${i}`, indent + 1);
-    }
-
     return;
   }
 

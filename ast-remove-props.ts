@@ -6,6 +6,7 @@ import {
   findLeadingPopsAndTrailingPushes,
   findLeftRight,
   findPathNames,
+  findPotentialDynamicAccessLiterals,
   genVariable,
   insertAfter,
   insertBefore,
@@ -35,7 +36,6 @@ const rejectlist = [
   "eci",
   "fncvals",
   "hasOwnProperty",
-  "j",
   "msg",
   "parse",
   "parsefnc",
@@ -52,7 +52,6 @@ const rejectlist = [
   "bwipjs_dontdraw",
   // The ones manually added in the bwipp_parseinput
   "msg",
-  "j",
 
   // Remove this one
   "pixs",
@@ -86,12 +85,9 @@ function processVariablesInScope(scope: NodePath<n.FunctionDeclaration>) {
   if (fnIgnorelist.includes(fnName!)) return 0;
   console.log("Processing top function", fnName);
   let editCount = 0;
+
   // The functions whose names also show up as string literals can be dynamically accessed, we must be careful optimizing them
-  const strLiterals = new Set<string>();
-  findInTree(scope.node, n.Literal, (strLit) => {
-    if (typeof strLit.node.value !== "string") return;
-    strLiterals.add(strLit.node.value);
-  });
+  const strLiterals = findPotentialDynamicAccessLiterals(scope.node);
 
   const allVarsToAdd: { oldName: string; newName: string }[] = [];
   findInTree(scope.node, n.ExpressionStatement, (assigExpr) => {

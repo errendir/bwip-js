@@ -26,6 +26,7 @@ import { rewriteForall } from "./ast-rewrite-forall";
 import { findLocalVars } from "./ast-find-local-vars";
 import { extractIntDivision } from "./ast-extract-int-div";
 import { printOutTree } from "./ast-printout";
+import { arrayPens } from "./ast-array-pens";
 
 // Load the ast (tree) from the file
 // const file = await fs.promises.readFile("./dist/bwipp.mjs", "utf-8");
@@ -39,9 +40,19 @@ initVariables(tree);
 
 // extractIntDivision(tree);
 
+// We want to start all the refactoring by rewriting $forall(xyz, callback) into a proper loop
+// This makes other refactors simpler since we don't have to worry about callback order
+// For example: rewriteForall refactor is required before the findLocalVars since
+// findLocalVars assumes there is no indirect unknown call anywhere
+rewriteForall(tree);
+
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
+while (simplifyIfForAccumulator(tree));
+while (simplifyBranchesWithCommonPop(tree));
+while (simplifyBranchesWithCommonPush(tree));
 extractFnParamsAndReturnsInGlobalFns(tree);
+
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
@@ -58,6 +69,22 @@ while (simplifyIfForAccumulator(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
+while (simplifyPushPop(tree));
+while (simplifyLongDistancePushPops(tree));
+
+while (inlineConstants(tree));
+while (simplifyPushPop(tree));
+while (simplifyLongDistancePushPops(tree));
+
+while (rewriteForall(tree));
+while (simplifyPushPop(tree));
+while (simplifyLongDistancePushPops(tree));
+
+while (arrayPens(tree));
+while (simplifyPushPop(tree));
+while (simplifyLongDistancePushPops(tree));
+
+while (simplifyIfForAccumulator(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
@@ -73,7 +100,6 @@ while (simplifyIfForAccumulator(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
-while (rewriteForall(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 while (simplifyIfForAccumulator(tree));
@@ -84,15 +110,29 @@ while (inlineConstants(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
-// findLocalVars(tree);
+while (arrayPens(tree));
+while (simplifyPushPop(tree));
+while (simplifyLongDistancePushPops(tree));
+
+while (simplifyIfForAccumulator(tree));
+while (simplifyPushPop(tree));
+while (simplifyLongDistancePushPops(tree));
+
+while (simplifyPushPop(tree));
+while (simplifyLongDistancePushPops(tree));
+
+findLocalVars(tree);
+findLocalVars(tree);
+
+// removeExtraProps(tree);
 
 // DISABLED
 
 console.profileEnd("processing");
 
-while (arrayLoad(tree));
-while (simplifyPushPop(tree));
-while (simplifyLongDistancePushPops(tree));
+// while (arrayLoad(tree));
+// while (simplifyPushPop(tree));
+// while (simplifyLongDistancePushPops(tree));
 
 // if (false) {
 //   findInTree(tree, n.FunctionDeclaration, (fnPath) => {
@@ -131,8 +171,6 @@ while (simplifyLongDistancePushPops(tree));
 //     idPath.insertAfter(b.expressionStatement(b.identifier("REP")));
 //   }
 // }
-
-// // removeExtraProps(tree);
 
 // // while (arrayLoad(tree));
 // // while (simplifyPushPop(tree));

@@ -115,27 +115,6 @@ function findRoot(path: NodePath) {
   }
 }
 
-function joinPaths(path1: NodePath, path2: NodePath) {
-  console.log("pathNames1", findPathNames(path1));
-  console.log("pathNames2", findPathNames(path2));
-  const names = findPathNames(path2).slice(2);
-  const totalPath = findPathNames(path1);
-
-  let newPath = path1;
-  for (const name of names) {
-    newPath = newPath.get(name);
-    totalPath.push(name);
-    if (newPath.value === undefined) {
-      console.log("root1");
-      printOutTree(findAllParents(path1)[1].value, "");
-      console.log("root2");
-      printOutTree(findAllParents(path2)[1].value, "");
-      throw new Error("There is nothing at the path " + totalPath.join(", "));
-    }
-  }
-  return newPath;
-}
-
 /** Takes a path to some statement */
 function* iterateOverExpressions(
   afterStatement: NodePath<any>,
@@ -154,10 +133,27 @@ function* iterateOverExpressions(
     //   print(currentStmt.node).code
     // );
 
-    function* visitExprs(nodePath: NodePath) {
+    function* visitExprs(nodePath: NodePath<n.Statement>) {
+      // In a call expression visit the args first before visiting the entire call
+      if (
+        n.ExpressionStatement.check(nodePath.node) &&
+        n.CallExpression.check(nodePath.node.expression)
+      ) {
+        yield* visitExprs(nodePath.get("expression").get("callee"));
+        const args = nodePath.node.expression.arguments;
+        for (let i = 0; i < args.length; ++i) {
+          yield* visitExprs(nodePath.get("expression").get("arguments").get(i));
+        }
+        yield nodePath.get("expression");
+        return;
+      }
       visit(nodePath as any, {
         visitExpression(path) {
           // console.log("EXPR", j(path.node as any).toSource(), path.node.type);
+
+          // Don't go into function expressions, we assume they are not indirectly called
+          if (n.FunctionExpression.check(path.node)) return false;
+
           exprs.push(path);
           this.traverse(path);
         },
@@ -173,21 +169,21 @@ function* iterateOverExpressions(
         !isStatementStackPure(currentStmt.path.get("alternate"))
       )
         return;
-    }
-    if (n.ForStatement.check(currentStmt.node)) {
+    } else if (n.ForStatement.check(currentStmt.node)) {
       if (currentStmt.node.init) {
         yield* visitExprs(currentStmt.path.get("init"));
       }
       if (!isStatementStackPure(currentStmt.path.get("body"))) return;
-    }
-    if (n.ForOfStatement.check(currentStmt.node)) {
+    } else if (n.ForOfStatement.check(currentStmt.node)) {
       if (currentStmt.node.right) {
         yield* visitExprs(currentStmt.path.get("right"));
       }
       if (!isStatementStackPure(currentStmt.path.get("body"))) return;
+    } else if (n.FunctionDeclaration.check(currentStmt.node)) {
+      // Noop, function declaration itself does nothing
+    } else {
+      yield* visitExprs(currentStmt.path);
     }
-
-    yield* visitExprs(currentStmt.path);
 
     currentStmt = justThisStatement
       ? null
@@ -195,7 +191,7 @@ function* iterateOverExpressions(
   }
 }
 
-function isStatementStackPure(stmt: NodePath) {
+export function isStatementStackPure(stmt: NodePath) {
   //   console.log("ANALYZING", findPathNames(stmt), print(stmt.node).code);
 
   if (n.BlockStatement.check(stmt.node)) {
@@ -210,8 +206,16 @@ function isStatementStackPure(stmt: NodePath) {
   if (n.ForStatement.check(stmt.node)) {
     // TODO: Actually analyze the `init` part
     return isStatementStackPure(stmt.get("body"));
-  }
-  if (n.IfStatement.check(stmt.node)) {
+  } else if (n.ForOfStatement.check(stmt.node)) {
+    // TODO: Actually analyze the `init` part
+    return isStatementStackPure(stmt.get("body"));
+  } else if (n.ForInStatement.check(stmt.node)) {
+    // TODO: Actually analyze the `init` part
+    return isStatementStackPure(stmt.get("body"));
+  } else if (n.WhileStatement.check(stmt.node)) {
+    // TODO: Actually analyze the `init` part
+    return isStatementStackPure(stmt.get("body"));
+  } else if (n.IfStatement.check(stmt.node)) {
     // TODO: Actually analyze the `test` part
     // console.log("IF_STMT", print(stmt.get("consequent")).code);
     if (!isStatementStackPure(stmt.get("consequent"))) return false;
@@ -220,24 +224,47 @@ function isStatementStackPure(stmt: NodePath) {
     //   isStatementStackPure(stmt.get("consequent")) &&
     //   (!stmt.node.alternate || isStatementStackPure(stmt.get("alternate")))
     // );
+  } else if (
+    n.BreakStatement.check(stmt.node) ||
+    n.EmptyStatement.check(stmt.node) ||
+    n.ContinueStatement.check(stmt.node) ||
+    n.FunctionDeclaration.check(stmt.node)
+  ) {
+    return true;
   }
 
-  for (const expr of iterateOverExpressions(stmt, true, true)) {
-    if (n.CallExpression.check(expr.node)) {
-      if (!isCallStackPure(expr as any)) {
+  if (
+    n.VariableDeclaration.check(stmt.node) ||
+    n.ExpressionStatement.check(stmt.node) ||
+    n.ReturnStatement.check(stmt.node) ||
+    n.ThrowStatement.check(stmt.node)
+  ) {
+    for (const expr of iterateOverExpressions(stmt, true, true)) {
+      if (n.CallExpression.check(expr.node)) {
+        if (!isCallStackPure(expr as any)) {
+          return false;
+        }
+      }
+
+      const source = print(expr.node).code;
+      if (source === "$k[$j++]") return false;
+      if (source === "$k[--$j]") return false;
+      if (isJMinusEquals(expr) !== null) return false;
+      if (isJMinusMinus(expr)) return false;
+
+      // Peek expressions are not stack pure
+      if (
+        n.MemberExpression.check(expr.node) &&
+        print(expr.node.object).code === "$k"
+      ) {
         return false;
       }
     }
-
-    const source = print(expr.node).code;
-    if (source === "$k[$j++]") {
-      return false;
-    }
-    if (source === "$k[--$j]") {
-      return false;
-    }
+    return true;
   }
-  return true;
+
+  printOutTree(stmt.node, "");
+  throw new Error("Cannot analyze the node for stack purity");
 }
 
 const knownStackPureFunctions = [
@@ -285,6 +312,11 @@ const knownStackPureFunctions = [
   "$$.restore",
   "$$.currpos",
   "$$.pathbbox",
+
+  "Object.create",
+  "Object.getPrototypeOf",
+  "bwipp_loadctx",
+
   {
     callee: "$a",
     extraTest(node: n.CallExpression) {
@@ -306,7 +338,7 @@ const knowStackImpureFunctions = [
   "$k.splice",
 ];
 
-function findFunctionBody(
+export function findFunctionBody(
   path: NodePath,
   fnName: string
 ): NodePath | undefined {
@@ -335,7 +367,7 @@ function findFunctionBody(
           n.FunctionExpression.check(rightNode) ||
           n.ArrowFunctionExpression.check(rightNode)
         ) {
-          return findRightPath(scopePath.get("body").get(i)).get("body");
+          return findRightPath(scopePath.get("body").get(i))!.get("body");
         }
       }
     }
@@ -344,7 +376,7 @@ function findFunctionBody(
 }
 
 const impureCalls = new Map<string, number>();
-function isCallStackPure(callExpr: NodePath<n.CallExpression>) {
+export function isCallStackPure(callExpr: NodePath<n.CallExpression>) {
   const callee = print(callExpr.node.callee as any).code;
   const knowStackPurity = knownStackPureFunctions.find((t) =>
     typeof t === "string" ? t === callee : t.callee === callee
@@ -355,9 +387,13 @@ function isCallStackPure(callExpr: NodePath<n.CallExpression>) {
       : knowStackPurity.extraTest(callExpr.node);
   }
 
-  if (knowStackImpureFunctions.includes(callee)) return false;
+  // Deal with the push/pop functions on array pens generated by the ast-array-pens refactor
+  if (callee === "$k.push") return false;
+  if (callee.endsWith(".push")) return true;
+  if (callee === "$k.pop") return false;
+  if (callee.endsWith(".pop")) return true;
 
-  // console.log("CHECKING", callee);
+  if (knowStackImpureFunctions.includes(callee)) return false;
 
   // // Dev helper: This makes sure all the paths passed to the `isCallStackPure` are globally rooted
   // const root = findRoot(callExpr);
@@ -439,13 +475,28 @@ export function findLeadingPopsAndTrailingPushes(
   path: NodePath<n.BlockStatement>
 ) {
   const leadingPops = findLeadingPopsFrom(path.get("body").get(0), true);
+  const trailingPushes = findTrailingPushes(
+    path.get("body").get(path.node.body.length - 1),
+    true
+  );
+
+  return { leadingPops, trailingPushes };
+}
+
+export function findTrailingPushes(
+  from: NodePath<n.Statement, any>,
+  includeThisStatement: boolean
+) {
   const trailingPushes: { path: NodePath; val: ExpressionKind }[] = [];
 
-  const lastStmt: NodePath = path.get("body").get(path.node.body.length - 1);
+  const lastStmt: NodePath = from;
   let line: { node: n.Node; path: NodePath } | null = {
     node: lastStmt.node,
     path: lastStmt,
   };
+  if (!includeThisStatement) {
+    line = findPrevStatement(line.path);
+  }
   while (line !== null) {
     if (n.ExpressionStatement.check(line.node)) {
       const pushedValue = getPushedValue(line.node);
@@ -460,8 +511,28 @@ export function findLeadingPopsAndTrailingPushes(
     }
     line = findPrevStatement(line.path);
   }
+  return trailingPushes;
+}
 
-  return { leadingPops, trailingPushes };
+export function isJMinusMinus(expr: NodePath<n.Expression>) {
+  return (
+    n.UpdateExpression.check(expr.node) &&
+    expr.node.operator === "--" &&
+    print(expr.node.argument).code === "$j"
+  );
+}
+
+export function isJMinusEquals(expr: NodePath<n.Expression>) {
+  if (
+    n.AssignmentExpression.check(expr.node) &&
+    expr.node.operator === "-=" &&
+    print(expr.node.left).code === "$j" &&
+    n.Literal.check(expr.node.right) &&
+    typeof expr.node.right.value === "number"
+  ) {
+    return expr.node.right.value;
+  }
+  return null;
 }
 
 function findPopEliminate(expr: NodePath<n.Expression>) {
@@ -478,11 +549,7 @@ function findPopEliminate(expr: NodePath<n.Expression>) {
   }
 
   // Expressions of the `$j--` form
-  if (
-    n.UpdateExpression.check(expr.node) &&
-    expr.node.operator === "--" &&
-    print(expr.node.argument).code === "$j"
-  ) {
+  if (isJMinusMinus(expr)) {
     return {
       count: 1,
       isMinusMinusJ: true,
@@ -504,7 +571,10 @@ function findPopEliminate(expr: NodePath<n.Expression>) {
       if (val === 1) {
         expr.prune();
       } else {
-        replace(expr, `$j -= ${val - 1};\n`);
+        // replace(expr, `$j -= ${val - 1};\n`);
+        expr.replace(
+          b.assignmentExpression("-=", b.identifier("$j"), b.literal(val - 1))
+        );
       }
     };
     return { count: val, eliminate };
@@ -514,11 +584,19 @@ function findPopEliminate(expr: NodePath<n.Expression>) {
     n.MemberExpression.check(expr.node) &&
     print(expr.node.object).code === "$k"
   ) {
-    const index = print(expr.node.property).code;
+    const indexNode = expr.node.property;
+    const index = print(indexNode).code;
     return {
       count: 0,
       eliminate: () => {
-        replace(expr, `$k[${index} + 1]`);
+        // replace(expr, `$k[${index} + 1]`);
+        expr.replace(
+          b.memberExpression(
+            b.identifier("$k"),
+            b.binaryExpression("+", indexNode, b.literal(1)),
+            true
+          )
+        );
       },
       isStackPeek: true,
     };
@@ -574,7 +652,7 @@ export function reparseParentStatemet(path: NodePath) {
   const [newpath] = path.replace(parse(print(path.value).code).program.body[0]);
 }
 
-function findRightPath(nodePath: NodePath) {
+export function findRightPath(nodePath: NodePath): NodePath | null {
   const node = nodePath.node;
   if (
     n.ExpressionStatement.check(node) &&
@@ -682,4 +760,24 @@ export function findAllParents(node: NodePath) {
     path = path.parentPath;
   }
   return parents.reverse();
+}
+
+export function findPotentialDynamicAccessLiterals(tree: n.Node) {
+  // The functions whose names also show up as string literals can be dynamically accessed, we must be careful optimizing them
+  // We can safetly ignore the literals that only appear as the first or second parameter to $eq(...)
+  const strLiterals = new Set<string>();
+  findInTree(tree, n.Literal, (strLit) => {
+    if (typeof strLit.node.value !== "string") return;
+    if (
+      strLit.parentPath.node &&
+      n.CallExpression.check(strLit.parentPath.node) &&
+      n.Identifier.check(strLit.parentPath.node.callee) &&
+      strLit.parentPath.node.callee.name === "$eq"
+    ) {
+      // console.log("SKIP",strLit.node.value,print(strLit.parentPath.node).code);
+      return;
+    }
+    strLiterals.add(strLit.node.value);
+  });
+  return strLiterals;
 }
