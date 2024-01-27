@@ -53,13 +53,14 @@ export function findInTree<N>(
 
 let freeVariable: number | null = null;
 export const initVariables = (tree: n.Node) => {
-  const identifiers: string[] = [];
-  findInTree(tree, n.Identifier, (id) => identifiers.push(id.node.name));
+  const allVarsRaw: string[] = [];
+  findInTree(tree, n.VariableDeclarator, (id) => {
+    if (!n.Identifier.check(id.node.id)) return;
+    const match = id.node.id.name.match(/x([^=\s_]+)/);
+    if (match) allVarsRaw.push(match[1]);
+  });
 
-  const allVarsRaw = identifiers
-    .map((id) => id.match(/_v([^=\s_]+)/))
-    .filter((m) => !!m);
-  const allVars = allVarsRaw.map((v) => parseInt(v![1], 36));
+  const allVars = allVarsRaw.map((v) => parseInt(v, 36));
   const maxVar = Math.max(...allVars, 0);
   if (isNaN(maxVar))
     throw new Error(
@@ -69,9 +70,12 @@ export const initVariables = (tree: n.Node) => {
 };
 export const genVariable = () => {
   if (freeVariable === null) throw new Error("UNINITIALIZED");
-  const variable = `_v${freeVariable.toString(36)}`;
+  const variable = `x${freeVariable.toString(36)}`;
   freeVariable++;
   return variable;
+};
+export const reportVariableCount = () => {
+  console.log("Generated", freeVariable, "variables");
 };
 
 export function findPrevStatement(firstPath: NodePath<any>) {
@@ -86,7 +90,6 @@ function findStatement(firstPath: NodePath<any>, delta: number) {
   const parentNode = firstPath.parent.node;
   if (!n.BlockStatement.check(parentNode)) return null;
   const childIndex = parentNode.body.indexOf(thisNode);
-
   if (childIndex === -1) throw new Error("WAT?");
   if (childIndex + delta >= parentNode.body.length || childIndex + delta < 0)
     return null;
@@ -191,8 +194,44 @@ function* iterateOverExpressions(
   }
 }
 
+export function isExpressionStackPure(
+  expr: NodePath<n.Expression | n.VariableDeclaration>
+) {
+  for (const subExpr of expressionsInEvalWeakOrder(expr)) {
+    if (!isSubexpressionStackPure(subExpr)) return false;
+  }
+  return true;
+}
+
+function isSubexpressionStackPure(
+  expr: NodePath<n.Expression | n.VariableDeclaration>
+) {
+  if (n.CallExpression.check(expr.node)) {
+    if (!isCallStackPure(expr as any)) {
+      return false;
+    }
+  }
+
+  const source = print(expr.node).code;
+  if (source === "$k[$j++]") return false;
+  if (source === "$k[--$j]") return false;
+  if (isJMinusEquals(expr) !== null) return false;
+  if (isJMinusMinus(expr)) return false;
+
+  // Peek expressions are not stack pure
+  if (
+    n.MemberExpression.check(expr.node) &&
+    print(expr.node.object).code === "$k"
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 export function isStatementStackPure(stmt: NodePath) {
-  //   console.log("ANALYZING", findPathNames(stmt), print(stmt.node).code);
+  // console.log("ANALYZING", findPathNames(stmt), print(stmt.node).code);
+  // printOutTree(stmt.node, "")
 
   if (n.BlockStatement.check(stmt.node)) {
     // console.log("BLOCK_STMT", print(stmt.node).code);
@@ -240,25 +279,7 @@ export function isStatementStackPure(stmt: NodePath) {
     n.ThrowStatement.check(stmt.node)
   ) {
     for (const expr of iterateOverExpressions(stmt, true, true)) {
-      if (n.CallExpression.check(expr.node)) {
-        if (!isCallStackPure(expr as any)) {
-          return false;
-        }
-      }
-
-      const source = print(expr.node).code;
-      if (source === "$k[$j++]") return false;
-      if (source === "$k[--$j]") return false;
-      if (isJMinusEquals(expr) !== null) return false;
-      if (isJMinusMinus(expr)) return false;
-
-      // Peek expressions are not stack pure
-      if (
-        n.MemberExpression.check(expr.node) &&
-        print(expr.node.object).code === "$k"
-      ) {
-        return false;
-      }
+      if (!isSubexpressionStackPure(expr)) return false;
     }
     return true;
   }
@@ -489,10 +510,9 @@ export function findTrailingPushes(
 ) {
   const trailingPushes: { path: NodePath; val: ExpressionKind }[] = [];
 
-  const lastStmt: NodePath = from;
   let line: { node: n.Node; path: NodePath } | null = {
-    node: lastStmt.node,
-    path: lastStmt,
+    node: from.node,
+    path: from,
   };
   if (!includeThisStatement) {
     line = findPrevStatement(line.path);
@@ -501,7 +521,7 @@ export function findTrailingPushes(
     if (n.ExpressionStatement.check(line.node)) {
       const pushedValue = getPushedValue(line.node);
       if (pushedValue) {
-        // console.log("FOUND TRAILING PUSH", j(line.node).toSource());
+        // console.log("FOUND TRAILING PUSH", print(line.node).code);
         trailingPushes.unshift({ path: line.path, val: pushedValue });
       } else {
         if (!isStatementStackPure(line.path)) break;
@@ -605,7 +625,7 @@ function findPopEliminate(expr: NodePath<n.Expression>) {
 
 export function getPushedValue(node: n.ExpressionStatement) {
   if (!n.AssignmentExpression.check(node.expression)) return null;
-  if (!print(node).code.includes("$k[$j++] = ")) return null;
+  if (!print(node.expression.left).code.includes("$k[$j++]")) return null;
 
   return node.expression.right;
 }
@@ -768,16 +788,149 @@ export function findPotentialDynamicAccessLiterals(tree: n.Node) {
   const strLiterals = new Set<string>();
   findInTree(tree, n.Literal, (strLit) => {
     if (typeof strLit.node.value !== "string") return;
+    const parentNode = strLit.parentPath.node;
     if (
-      strLit.parentPath.node &&
-      n.CallExpression.check(strLit.parentPath.node) &&
-      n.Identifier.check(strLit.parentPath.node.callee) &&
-      strLit.parentPath.node.callee.name === "$eq"
+      parentNode &&
+      n.CallExpression.check(parentNode) &&
+      n.Identifier.check(parentNode.callee)
     ) {
-      // console.log("SKIP",strLit.node.value,print(strLit.parentPath.node).code);
+      if (parentNode.callee.name === "$eq") return;
+      if (parentNode.callee.name === "$ne") return;
+      if (parentNode.callee.name === "bwipp_raiseerror") return;
+    }
+    if (
+      parentNode &&
+      n.NewExpression.check(parentNode) &&
+      n.Identifier.check(parentNode.callee) &&
+      parentNode.callee.name === "Error"
+    ) {
+      return;
+    }
+    if (
+      parentNode &&
+      n.BinaryExpression.check(parentNode) &&
+      (parentNode.operator === "==" || parentNode.operator === "===")
+    ) {
       return;
     }
     strLiterals.add(strLit.node.value);
   });
   return strLiterals;
+}
+
+export function* expressionsInEvalWeakOrder(
+  exprStmt: NodePath
+): Generator<NodePath> {
+  if (n.Identifier.check(exprStmt.node)) {
+    yield exprStmt;
+  } else if (n.VariableDeclaration.check(exprStmt.node)) {
+    // We allow variable declaration here since it may be a part of the for loop init
+    const declrs = exprStmt.node.declarations;
+    for (let i = 0; i < declrs.length; ++i) {
+      const declr = declrs[i];
+      if (n.VariableDeclarator.check(declr) && declr.init) {
+        yield* expressionsInEvalWeakOrder(
+          exprStmt.get("declarations").get(i).get("init")
+        );
+      }
+    }
+  } else if (n.Literal.check(exprStmt.node)) {
+    yield exprStmt;
+  } else if (n.ConditionalExpression.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("test"));
+    yield* expressionsInEvalWeakOrder(exprStmt.get("consequent"));
+    yield* expressionsInEvalWeakOrder(exprStmt.get("alternate"));
+    yield exprStmt;
+  } else if (n.AssignmentExpression.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("right"));
+    // WARNING: There could technically be a read on the left as well
+    yield exprStmt;
+  } else if (n.NewExpression.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("callee"));
+    for (let i = 0; i < exprStmt.node.arguments.length; ++i) {
+      yield* expressionsInEvalWeakOrder(exprStmt.get("arguments").get(i));
+    }
+    yield exprStmt;
+  } else if (n.MemberExpression.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("object"));
+    yield* expressionsInEvalWeakOrder(exprStmt.get("property"));
+    yield exprStmt;
+  } else if (n.LogicalExpression.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("left"));
+    yield* expressionsInEvalWeakOrder(exprStmt.get("right"));
+    yield exprStmt;
+  } else if (n.BinaryExpression.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("left"));
+    yield* expressionsInEvalWeakOrder(exprStmt.get("right"));
+    yield exprStmt;
+  } else if (n.UnaryExpression.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("argument"));
+    yield exprStmt;
+  } else if (n.UpdateExpression.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("argument"));
+    yield exprStmt;
+  } else if (n.ArrayExpression.check(exprStmt.node)) {
+    for (let i = 0; i < exprStmt.node.elements.length; ++i) {
+      yield* expressionsInEvalWeakOrder(exprStmt.get("elements").get(i));
+    }
+    yield exprStmt;
+  } else if (n.SpreadElement.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("argument"));
+    yield exprStmt;
+  } else if (n.FunctionExpression.check(exprStmt.node)) {
+    yield exprStmt;
+  } else if (n.CallExpression.check(exprStmt.node)) {
+    yield* expressionsInEvalWeakOrder(exprStmt.get("callee"));
+    for (let i = 0; i < exprStmt.node.arguments.length; ++i) {
+      yield* expressionsInEvalWeakOrder(exprStmt.get("arguments").get(i));
+    }
+    yield exprStmt;
+  } else if (n.ThisExpression.check(exprStmt.node)) {
+    yield exprStmt;
+  } else {
+    console.log(exprStmt.node.type, printOutTree(exprStmt.node, ""));
+    throw new Error("UNKNOWN EXPR");
+  }
+}
+
+/** Existing block is a block always ending with a throw, return or break */
+export function isExitingBlock(
+  blockPath: NodePath<n.BlockStatement>,
+  onlyThrows = false
+) {
+  for (let i = 0; i < blockPath.node.body.length; ++i) {
+    const stmtPath: NodePath = blockPath.get("body").get(i);
+    if (
+      onlyThrows
+        ? n.ThrowStatement.check(stmtPath.node)
+        : n.ThrowStatement.check(stmtPath.node) ||
+          n.ReturnStatement.check(stmtPath.node) ||
+          n.BreakStatement.check(stmtPath.node)
+    ) {
+      return true;
+    } else if (n.IfStatement.check(stmtPath.node)) {
+      let bothExit =
+        n.BlockStatement.check(stmtPath.node.consequent) &&
+        isExitingBlock(stmtPath.get("consequent"));
+
+      if (stmtPath.node.alternate) {
+        bothExit =
+          bothExit &&
+          n.BlockStatement.check(stmtPath.node.consequent) &&
+          isExitingBlock(stmtPath.get("alternate"));
+      }
+
+      if (bothExit) return true;
+    } else if (
+      n.ExpressionStatement.check(stmtPath.node) &&
+      n.CallExpression.check(stmtPath.node.expression)
+    ) {
+      const fnName = print(stmtPath.node.expression.callee).code;
+      const fnBody = findFunctionBody(stmtPath, fnName);
+      const isExiting = !!fnBody && isExitingBlock(fnBody, true);
+      if (isExiting) return true;
+    }
+  }
+
+  return false;
 }

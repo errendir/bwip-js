@@ -15,11 +15,12 @@ import {
   insertAfter,
   insertBefore,
   replace,
+  expressionsInEvalWeakOrder,
 } from "./ast-helpers";
 import { NodePath } from "ast-types/lib/node-path";
 import { printOutTree } from "./ast-printout";
 
-export function findLocalVars(tree: n.Node) {
+export function delayPropertyAssignment(tree: n.Node) {
   let editCount = 0;
 
   // Find all the top level functions and go through each one by one
@@ -35,78 +36,6 @@ export function findLocalVars(tree: n.Node) {
   console.log("removed variables from the $_. scope", editCount);
 
   return editCount;
-}
-
-function* expressionsInEvalWeakOrder(exprStmt: NodePath): Generator<NodePath> {
-  if (n.Identifier.check(exprStmt.node)) {
-    yield exprStmt;
-  } else if (n.VariableDeclaration.check(exprStmt.node)) {
-    // We allow variable declaration here since it may be a part of the for loop init
-    const declrs = exprStmt.node.declarations;
-    for (let i = 0; i < declrs.length; ++i) {
-      const declr = declrs[i];
-      if (n.VariableDeclarator.check(declr) && declr.init) {
-        yield* expressionsInEvalWeakOrder(
-          exprStmt.get("declarations").get(i).get("init")
-        );
-      }
-    }
-  } else if (n.Literal.check(exprStmt.node)) {
-    yield exprStmt;
-  } else if (n.ConditionalExpression.check(exprStmt.node)) {
-    yield* expressionsInEvalWeakOrder(exprStmt.get("test"));
-    yield* expressionsInEvalWeakOrder(exprStmt.get("consequent"));
-    yield* expressionsInEvalWeakOrder(exprStmt.get("alternate"));
-    yield exprStmt;
-  } else if (n.AssignmentExpression.check(exprStmt.node)) {
-    yield* expressionsInEvalWeakOrder(exprStmt.get("right"));
-    // WARNING: There could technically be a read on the left as well
-    yield exprStmt;
-  } else if (n.NewExpression.check(exprStmt.node)) {
-    yield* expressionsInEvalWeakOrder(exprStmt.get("callee"));
-    for (let i = 0; i < exprStmt.node.arguments.length; ++i) {
-      yield* expressionsInEvalWeakOrder(exprStmt.get("arguments").get(i));
-    }
-    yield exprStmt;
-  } else if (n.MemberExpression.check(exprStmt.node)) {
-    yield* expressionsInEvalWeakOrder(exprStmt.get("object"));
-    yield* expressionsInEvalWeakOrder(exprStmt.get("property"));
-    yield exprStmt;
-  } else if (n.LogicalExpression.check(exprStmt.node)) {
-    yield* expressionsInEvalWeakOrder(exprStmt.get("left"));
-    yield* expressionsInEvalWeakOrder(exprStmt.get("right"));
-    yield exprStmt;
-  } else if (n.BinaryExpression.check(exprStmt.node)) {
-    yield* expressionsInEvalWeakOrder(exprStmt.get("left"));
-    yield* expressionsInEvalWeakOrder(exprStmt.get("right"));
-    yield exprStmt;
-  } else if (n.UnaryExpression.check(exprStmt.node)) {
-    yield* expressionsInEvalWeakOrder(exprStmt.get("argument"));
-    yield exprStmt;
-  } else if (n.UpdateExpression.check(exprStmt.node)) {
-    yield* expressionsInEvalWeakOrder(exprStmt.get("argument"));
-    yield exprStmt;
-  } else if (n.ArrayExpression.check(exprStmt.node)) {
-    for (let i = 0; i < exprStmt.node.elements.length; ++i) {
-      yield* expressionsInEvalWeakOrder(exprStmt.get("elements").get(i));
-    }
-    yield exprStmt;
-  } else if (n.SpreadElement.check(exprStmt.node)) {
-    exprStmt.node.argument;
-    yield* expressionsInEvalWeakOrder(exprStmt.get("argument"));
-    yield exprStmt;
-  } else if (n.FunctionExpression.check(exprStmt.node)) {
-    yield exprStmt;
-  } else if (n.CallExpression.check(exprStmt.node)) {
-    yield* expressionsInEvalWeakOrder(exprStmt.get("callee"));
-    for (let i = 0; i < exprStmt.node.arguments.length; ++i) {
-      yield* expressionsInEvalWeakOrder(exprStmt.get("arguments").get(i));
-    }
-    yield exprStmt;
-  } else {
-    console.log(exprStmt.node.type, printOutTree(exprStmt.node, ""));
-    throw new Error("UNKNOWN EXPR");
-  }
 }
 
 const dynamicFnsList = new Set(["bwipp_processoptions", "bwipp_parseinput"]);
@@ -136,23 +65,20 @@ function isFnPureInVar(
   const fnBody = findFunctionBody(callPath, fnName);
   if (!fnBody) {
     return "unknowable";
-  } else {
-    // if (cache.has(fnBody.node)) {
-    //   return cache.get(fnBody.node)!;
-    // }
-    const fnBodyCode = print(fnBody.node).code;
-    const isPureInVar = !fnBodyCode.includes(varName);
-    // console.log("SEARCHING FOR ", varName, " IN ", fnBodyCode, isPureInVar);
-    // cache.set(fnBody.node, isPureInVar);
-    return isPureInVar ? "pure" : "impure";
   }
+  // if (cache.has(fnBody.node)) {
+  //   return cache.get(fnBody.node)!;
+  // }
+  const fnBodyCode = print(fnBody.node).code;
+  const isPureInVar = !fnBodyCode.includes(varName);
+  // console.log("SEARCHING FOR ", varName, " IN ", fnBodyCode, isPureInVar);
+  // cache.set(fnBody.node, isPureInVar);
+  return isPureInVar ? "pure" : "impure";
 }
 
 type VarAccess =
   | { type: "read"; path: NodePath; forDepth: number }
   | { type: "write"; path: NodePath; forDepth: number }
-  | { type: "dynamic-read" }
-  | { type: "dynamic-write" }
   | { type: "undetermined" }
   | {
       type: "call";
@@ -231,6 +157,15 @@ function* findReadsAndWritesIn(
     // yield* processRootExpression(stmtPath.get("right"));
     yield { type: "undetermined" };
   } else if (n.IfStatement.check(stmtPath.node)) {
+    // Skip the definer blocks: if there is any local variable read/write there it's a serious bug
+    // potentially leaking data from one barcode generation call to another
+    if (
+      n.BlockStatement.check(stmtPath.node.consequent) &&
+      isDefinerBlock(stmtPath.node.consequent)
+    ) {
+      return;
+    }
+
     yield* processRootExpression(stmtPath.get("test"));
     yield* findReadsAndWritesIn(stmtPath.get("consequent"), varName);
     if (stmtPath.node.alternate) {
@@ -280,7 +215,7 @@ function processLocalVariablesInScope(scope: NodePath) {
           if (varAccess.type === "call" && varAccess.isPureInVar !== "pure") {
             const worthIt = isRefactoringWorthIt();
             console.log(
-              `${worthIt ? "Stopping refactor" : "Giving up"} due to ${
+              `${worthIt ? "Running refactor until" : "Giving up due to"} ${
                 varAccess.isPureInVar
               } call (with respect to the ${originalVarName} var)`,
               print(varAccess.path.node).code
@@ -444,13 +379,17 @@ function isInDefinerBlock(path: NodePath) {
   return findAllParents(path).some((parentPath) => {
     if (!n.BlockStatement.check(parentPath.node)) return false;
 
-    return parentPath.node.body.some(
-      (stmt) =>
-        n.ForInStatement.check(stmt) &&
-        print(stmt.right).code === "$_" &&
-        print(stmt.left).code === "var id"
-    );
+    return isDefinerBlock(parentPath.node);
   });
+}
+
+export function isDefinerBlock(node: n.BlockStatement) {
+  return node.body.some(
+    (stmt) =>
+      n.ForInStatement.check(stmt) &&
+      print(stmt.right).code === "$_" &&
+      print(stmt.left).code === "var id"
+  );
 }
 
 function isChild(parent: NodePath, node: n.Node) {

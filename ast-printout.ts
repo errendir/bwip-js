@@ -48,6 +48,10 @@ export function printOutTree(tree: n.Node, prefix: string, indent = 0) {
     console.log(reindent(print(tree).code));
     return;
   }
+  if (n.ThisExpression.check(tree)) {
+    console.log(prefixStr + tree.type);
+    return;
+  }
   if (n.EmptyStatement.check(tree)) {
     console.log(prefixStr + tree.type + print(tree).code);
     return;
@@ -160,13 +164,13 @@ export function printOutTree(tree: n.Node, prefix: string, indent = 0) {
     tree.alternate && printOutTree(tree.alternate, "alternate", indent + 1);
     return;
   }
-  if (n.ReturnStatement.check(tree)) {
+  if (n.ReturnStatement.check(tree) || n.ThrowStatement.check(tree)) {
     console.log(prefixStr + tree.type);
     console.log(reindent(print(tree).code));
     tree.argument && printOutTree(tree.argument, "argument", indent + 1);
     return;
   }
-  if (n.BreakStatement.check(tree)) {
+  if (n.BreakStatement.check(tree) || n.ContinueStatement.check(tree)) {
     console.log(prefixStr + tree.type);
     return;
   }

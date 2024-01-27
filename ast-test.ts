@@ -5,7 +5,12 @@ import { namedTypes as n, builders as b } from "ast-types";
 
 import * as fs from "node:fs";
 
-import { findInTree, findPathNames, initVariables } from "./ast-helpers";
+import {
+  findInTree,
+  findPathNames,
+  initVariables,
+  reportVariableCount,
+} from "./ast-helpers";
 import {
   simplifyLongDistancePushPops,
   simplifyPushPop,
@@ -13,6 +18,7 @@ import {
 import {
   simplifyBranchesWithCommonPop,
   simplifyBranchesWithCommonPush,
+  simplifyExitingBranchesWithCommonPop,
 } from "./ast-extract-common-push-pop";
 import { simplifyIfForAccumulator } from "./ast-accumulator";
 import {
@@ -23,10 +29,11 @@ import { inlineConstants } from "./ast-inline-constants";
 import { arrayLoad } from "./ast-array-load";
 import { removeExtraProps } from "./ast-remove-props";
 import { rewriteForall } from "./ast-rewrite-forall";
-import { findLocalVars } from "./ast-find-local-vars";
+import { delayPropertyAssignment } from "./ast-delay-property-assignment";
 import { extractIntDivision } from "./ast-extract-int-div";
 import { printOutTree } from "./ast-printout";
 import { arrayPens } from "./ast-array-pens";
+import { removeUnusedVars } from "./ast-remove-unused-vars";
 
 // Load the ast (tree) from the file
 // const file = await fs.promises.readFile("./dist/bwipp.mjs", "utf-8");
@@ -42,15 +49,21 @@ initVariables(tree);
 
 // We want to start all the refactoring by rewriting $forall(xyz, callback) into a proper loop
 // This makes other refactors simpler since we don't have to worry about callback order
-// For example: rewriteForall refactor is required before the findLocalVars since
-// findLocalVars assumes there is no indirect unknown call anywhere
+// For example: rewriteForall refactor is required before the delayPropertyAssignment since
+// delayPropertyAssignment assumes there is no indirect unknown call anywhere
 rewriteForall(tree);
 
-while (simplifyPushPop(tree));
-while (simplifyLongDistancePushPops(tree));
-while (simplifyIfForAccumulator(tree));
+const accumulatorRound = (tree: n.Node) => {
+  while (simplifyPushPop(tree));
+  while (simplifyLongDistancePushPops(tree));
+  return simplifyIfForAccumulator(tree);
+};
+while (accumulatorRound(tree));
 while (simplifyBranchesWithCommonPop(tree));
+while (simplifyExitingBranchesWithCommonPop(tree));
 while (simplifyBranchesWithCommonPush(tree));
+while (accumulatorRound(tree));
+
 extractFnParamsAndReturnsInGlobalFns(tree);
 
 while (simplifyPushPop(tree));
@@ -61,11 +74,12 @@ while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
 while (simplifyBranchesWithCommonPop(tree));
+while (simplifyExitingBranchesWithCommonPop(tree));
 while (simplifyBranchesWithCommonPush(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
-while (simplifyIfForAccumulator(tree));
+while (accumulatorRound(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
@@ -84,7 +98,7 @@ while (arrayPens(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
-while (simplifyIfForAccumulator(tree));
+while (accumulatorRound(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
@@ -94,15 +108,14 @@ while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 // The refactored call-sites may now have common pops/pushes in if/else branches
 while (simplifyBranchesWithCommonPop(tree));
+while (simplifyExitingBranchesWithCommonPop(tree));
 while (simplifyBranchesWithCommonPush(tree));
 
-while (simplifyIfForAccumulator(tree));
-while (simplifyPushPop(tree));
-while (simplifyLongDistancePushPops(tree));
+while (accumulatorRound(tree));
 
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
-while (simplifyIfForAccumulator(tree));
+while (accumulatorRound(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
@@ -114,21 +127,22 @@ while (arrayPens(tree));
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
-while (simplifyIfForAccumulator(tree));
-while (simplifyPushPop(tree));
-while (simplifyLongDistancePushPops(tree));
+while (accumulatorRound(tree));
 
 while (simplifyPushPop(tree));
 while (simplifyLongDistancePushPops(tree));
 
-findLocalVars(tree);
-findLocalVars(tree);
+delayPropertyAssignment(tree);
+delayPropertyAssignment(tree);
 
-// removeExtraProps(tree);
+// This is enabled by delayPropertyAssignment
+removeUnusedVars(tree);
 
-// DISABLED
+// DISABLED SINCE IT POLLUTES THE GLOBAL NAMESPACE TOO MUCH
+removeExtraProps(tree);
 
 console.profileEnd("processing");
+reportVariableCount();
 
 // while (arrayLoad(tree));
 // while (simplifyPushPop(tree));
