@@ -50,6 +50,11 @@ var $j = 0; // stack pointer
 var $k = []; // operand stack
 var $_ = {}; // base of the dictionary stack
 
+// Integer division
+function $id(a, b) {
+    return ~~(a/b);
+}
+
 // Array ctor
 //	$a()	: Build a new array up to the Infinity-marker on the stack.
 //	$a(arr)	: Convert native array to a "view" of the array.
