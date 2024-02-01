@@ -33,7 +33,8 @@ import { delayPropertyAssignment } from "./ast-delay-property-assignment";
 import { extractIntDivision } from "./ast-extract-int-div";
 import { printOutTree } from "./ast-printout";
 import { arrayPens } from "./ast-array-pens";
-import { removeUnusedVars } from "./ast-remove-unused-vars";
+import { removeUnusedProps } from "./ast-remove-unused-props";
+import { removeUnusedVars, simplifyVariables } from "./ast-simplify-variables";
 
 // Load the ast (tree) from the file
 // const file = await fs.promises.readFile("./dist/bwipp.mjs", "utf-8");
@@ -45,7 +46,7 @@ let tree = parse(file) as n.Node;
 
 initVariables(tree);
 
-// extractIntDivision(tree);
+extractIntDivision(tree);
 
 // We want to start all the refactoring by rewriting $forall(xyz, callback) into a proper loop
 // This makes other refactors simpler since we don't have to worry about callback order
@@ -136,10 +137,13 @@ delayPropertyAssignment(tree);
 delayPropertyAssignment(tree);
 
 // This is enabled by delayPropertyAssignment
+removeUnusedProps(tree);
+
+simplifyVariables(tree);
 removeUnusedVars(tree);
 
 // DISABLED SINCE IT POLLUTES THE GLOBAL NAMESPACE TOO MUCH
-removeExtraProps(tree);
+// removeExtraProps(tree);
 
 console.profileEnd("processing");
 reportVariableCount();

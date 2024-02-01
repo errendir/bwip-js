@@ -34,7 +34,7 @@ function findAllReachableFns(body: NodePath<n.BlockStatement>) {
 // Certain refactors we want to only perform starting from the "top-level" functions
 const topLevelCallFns = ["bwipp_qrcode"];
 
-export function removeUnusedVars(tree: n.Node) {
+export function removeUnusedProps(tree: n.Node) {
   let editCount = 0;
 
   // Find all the top level functions and go through each one by one
@@ -51,14 +51,14 @@ export function removeUnusedVars(tree: n.Node) {
       return;
     }
 
-    editCount += removeUnusedVarsInOneTopLevelFn(fnPath);
+    editCount += removeUnusedPropsInOneTopLevelFn(fnPath);
   });
   console.log("removed variables from the $_. scope", editCount);
 
   return editCount;
 }
 
-function removeUnusedVarsInOneTopLevelFn(
+function removeUnusedPropsInOneTopLevelFn(
   fnPath: NodePath<n.FunctionDeclaration>
 ) {
   let editCount = 0;
